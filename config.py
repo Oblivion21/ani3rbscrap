@@ -21,7 +21,7 @@ PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD") or "kBie3DT0JM6Dfbqb"
 # Your keys are set directly below. Env vars override if set.
 SCRAPEOPS_API_KEY = os.environ.get("SCRAPEOPS_API_KEY") or "2be635e7-d1a2-4043-adf0-4b1aef27ad6a"
 SCRAPFLY_API_KEY = os.environ.get("SCRAPFLY_API_KEY") or "scp-live-c1d72453a9034f8ba2f8669dbe77c8ad"
-CRAWLBASE_TOKEN = os.environ.get("CRAWLBASE_TOKEN") or "Uxa3140A7nPCNvQMcgNwmg"
+CRAWLBASE_TOKEN = os.environ.get("CRAWLBASE_TOKEN") or "DfAaR8PH5yagMYYggIESWQ"
 SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY") or "29e43c18d4b6d6e4b0e37c1758ef57eb"
 
 # ─── Timeouts & retries ───────────────────────────────────────
