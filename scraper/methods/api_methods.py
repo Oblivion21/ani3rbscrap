@@ -1,8 +1,9 @@
 """
 Steps 6–9 — Paid Scraping APIs
 
-Each function fetches the page via a paid API service and extracts the video URL.
-These services handle proxies, browsers, and challenge solving behind a single API call.
+Each service handles Cloudflare/Turnstile server-side — there's nothing to
+click. The key is sending the right parameters so each service enables its
+full JS-rendering + challenge-solving pipeline.
 """
 
 from typing import Optional
@@ -11,12 +12,18 @@ import config
 from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
 
 
+def _debug_response(name: str, text: str):
+    """Print a snippet of the response to help diagnose failures."""
+    snippet = text.replace("\n", " ")[:400]
+    print(f"  [{name}] Response snippet: {snippet}")
+
+
 # ────────────────────────────────────────────────────────────────
-# Step 6 — ScrapeOps (free tier: 1,000 credits/month)
+# Step 6 — ScrapeOps
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_scrapeops(episode_url: str) -> Optional[str]:
-    """Use ScrapeOps proxy API with JS rendering and Cloudflare bypass."""
+    """Use ScrapeOps with Cloudflare level-3 bypass (Turnstile-capable)."""
     if not config.SCRAPEOPS_API_KEY:
         raise SkipMethod("scrapeops: no API key in config.py (SCRAPEOPS_API_KEY)")
 
@@ -30,15 +37,19 @@ async def scrape_scrapeops(episode_url: str) -> Optional[str]:
             "api_key": config.SCRAPEOPS_API_KEY,
             "url": episode_url,
             "render_js": "true",
-            "bypass": "cloudflare",
+            # level_3 uses a real browser + Turnstile solver
+            "bypass": "cloudflare_level_3",
+            "residential": "true",
+            "country": "us",
         },
-        timeout=config.PAGE_LOAD_TIMEOUT + 30,
+        timeout=config.PAGE_LOAD_TIMEOUT + 60,
     )
 
     print(f"  [scrapeops] Status: {resp.status_code}, body: {len(resp.text)} chars")
 
     if resp.status_code != 200:
         print(f"  [scrapeops] Non-200 status")
+        _debug_response("scrapeops", resp.text)
         return None
 
     if is_cloudflare_challenge(resp.text):
@@ -50,17 +61,17 @@ async def scrape_scrapeops(episode_url: str) -> Optional[str]:
         print(f"  [scrapeops] Found video URL")
         return video_url
 
-    print(f"  [scrapeops] Page loaded but no video URL found in response")
-    print(f"  [scrapeops] First 300 chars: {resp.text[:300]}")
+    print(f"  [scrapeops] Page loaded but no video URL found")
+    _debug_response("scrapeops", resp.text)
     return None
 
 
 # ────────────────────────────────────────────────────────────────
-# Step 7 — Scrapfly (highest success rate, 98.8%)
+# Step 7 — Scrapfly
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_scrapfly(episode_url: str) -> Optional[str]:
-    """Use Scrapfly API with Anti Scraping Protection bypass."""
+    """Use Scrapfly with ASP (Anti Scraping Protection) + JS rendering."""
     if not config.SCRAPFLY_API_KEY:
         raise SkipMethod("scrapfly: no API key in config.py (SCRAPFLY_API_KEY)")
 
@@ -73,20 +84,24 @@ async def scrape_scrapfly(episode_url: str) -> Optional[str]:
         params={
             "key": config.SCRAPFLY_API_KEY,
             "url": episode_url,
+            # asp=true enables Cloudflare/Turnstile bypass
             "asp": "true",
             "render_js": "true",
             "country": "us",
+            # Wait for video player element before returning HTML
+            "wait_for_selector": "video,#player,.episode-player,[class*='player']",
+            # Give JS 10s to execute after page load
+            "wait": "10000",
         },
-        timeout=config.PAGE_LOAD_TIMEOUT + 30,
+        timeout=config.PAGE_LOAD_TIMEOUT + 60,
     )
 
     print(f"  [scrapfly] Status: {resp.status_code}")
 
     if resp.status_code != 200:
         print(f"  [scrapfly] Non-200 status")
-        # Print error details if available
         try:
-            print(f"  [scrapfly] Response: {resp.text[:300]}")
+            _debug_response("scrapfly", resp.text)
         except Exception:
             pass
         return None
@@ -103,37 +118,45 @@ async def scrape_scrapfly(episode_url: str) -> Optional[str]:
         print(f"  [scrapfly] Found video URL")
         return video_url
 
-    print(f"  [scrapfly] Page loaded but no video URL found in response")
-    print(f"  [scrapfly] Content length: {len(content)} chars, first 300: {content[:300]}")
+    print(f"  [scrapfly] Page loaded but no video URL found (content: {len(content)} chars)")
+    _debug_response("scrapfly", content)
     return None
 
 
 # ────────────────────────────────────────────────────────────────
-# Step 8 — Crawlbase (true pay-as-you-go, no monthly fee)
+# Step 8 — Crawlbase
+# NOTE: You must use a JavaScript API token, not a regular token.
+#       Get yours at: https://crawlbase.com/dashboard
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_crawlbase(episode_url: str) -> Optional[str]:
-    """Use Crawlbase API with JS token."""
+    """Use Crawlbase JS API (requires JavaScript token) with full page rendering."""
     if not config.CRAWLBASE_TOKEN:
         raise SkipMethod("crawlbase: no token in config.py (CRAWLBASE_TOKEN)")
 
     import requests
 
-    print(f"  [crawlbase] Fetching via Crawlbase API")
+    print(f"  [crawlbase] Fetching via Crawlbase JS API")
 
     resp = requests.get(
         "https://api.crawlbase.com/",
         params={
+            # Must be a JavaScript API token (not a normal token)
             "token": config.CRAWLBASE_TOKEN,
             "url": episode_url,
+            # Wait for all AJAX/XHR requests to complete
+            "ajax_wait": "true",
+            # Wait 8 seconds after page load (time for Turnstile + player init)
+            "page_wait": "8000",
         },
-        timeout=config.PAGE_LOAD_TIMEOUT + 30,
+        timeout=config.PAGE_LOAD_TIMEOUT + 60,
     )
 
     print(f"  [crawlbase] Status: {resp.status_code}, body: {len(resp.text)} chars")
 
     if resp.status_code != 200:
         print(f"  [crawlbase] Non-200 status")
+        _debug_response("crawlbase", resp.text)
         return None
 
     if is_cloudflare_challenge(resp.text):
@@ -145,17 +168,17 @@ async def scrape_crawlbase(episode_url: str) -> Optional[str]:
         print(f"  [crawlbase] Found video URL")
         return video_url
 
-    print(f"  [crawlbase] Page loaded but no video URL found in response")
-    print(f"  [crawlbase] First 300 chars: {resp.text[:300]}")
+    print(f"  [crawlbase] Page loaded but no video URL found")
+    _debug_response("crawlbase", resp.text)
     return None
 
 
 # ────────────────────────────────────────────────────────────────
-# Step 9 — ScraperAPI (most documented, large community)
+# Step 9 — ScraperAPI
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_scraperapi(episode_url: str) -> Optional[str]:
-    """Use ScraperAPI with JS rendering and premium residential proxies."""
+    """Use ScraperAPI with JS rendering, premium proxies, and Cloudflare bypass."""
     if not config.SCRAPERAPI_KEY:
         raise SkipMethod("scraperapi: no API key in config.py (SCRAPERAPI_KEY)")
 
@@ -168,16 +191,22 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
         params={
             "api_key": config.SCRAPERAPI_KEY,
             "url": episode_url,
+            # render=true runs a real headless Chrome browser
             "render": "true",
+            # premium proxies have higher Cloudflare bypass success rate
             "premium": "true",
+            "country_code": "us",
+            # Wait for video player element before capturing HTML
+            "wait_for_selector": "video,#player,[class*='player']",
         },
-        timeout=config.PAGE_LOAD_TIMEOUT + 30,
+        timeout=config.PAGE_LOAD_TIMEOUT + 60,
     )
 
     print(f"  [scraperapi] Status: {resp.status_code}, body: {len(resp.text)} chars")
 
     if resp.status_code != 200:
         print(f"  [scraperapi] Non-200 status")
+        _debug_response("scraperapi", resp.text)
         return None
 
     if is_cloudflare_challenge(resp.text):
@@ -189,6 +218,6 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
         print(f"  [scraperapi] Found video URL")
         return video_url
 
-    print(f"  [scraperapi] Page loaded but no video URL found in response")
-    print(f"  [scraperapi] First 300 chars: {resp.text[:300]}")
+    print(f"  [scraperapi] Page loaded but no video URL found")
+    _debug_response("scraperapi", resp.text)
     return None
