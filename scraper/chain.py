@@ -15,6 +15,7 @@ from scraper.methods.api_methods import (
     scrape_crawlbase,
     scrape_scraperapi,
 )
+from scraper.utils import SkipMethod
 import config
 
 
@@ -40,13 +41,9 @@ async def scrape_video_url(
     """
     Try each scraping method in order. Return the first video URL found, or None.
 
-    Args:
-        episode_url: Full URL of the anime episode page.
-        methods:     Optional list of method names to try (subset of METHODS).
-                     If None, tries all methods in order.
-
-    Returns:
-        The mp4 video URL string, or None if all methods fail.
+    - SkipMethod exception  → method can't run at all, move to next immediately
+    - None return           → method tried but failed, move to next immediately
+    - Other exception       → transient error, retry up to MAX_RETRIES times
     """
     chain = METHODS
     if methods:
@@ -58,6 +55,7 @@ async def scrape_video_url(
 
     for name, scrape_fn in chain:
         print(f"--- Trying method: {name} ---")
+
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:
                 result = await scrape_fn(episode_url)
@@ -65,17 +63,26 @@ async def scrape_video_url(
                     print(f"\n✓ Success with method '{name}' (attempt {attempt})")
                     print(f"  Video URL: {result}")
                     return result
-                else:
-                    print(f"  [{name}] Attempt {attempt}: no result")
+                # None = tried and definitively failed, no point retrying
+                print(f"  [{name}] No result, moving on")
+                break
+
+            except SkipMethod as e:
+                # Method can't run at all (not installed, no API key)
+                print(f"  [{name}] Skipped: {e}")
+                break
+
             except Exception as e:
+                # Transient error — worth retrying
                 print(f"  [{name}] Attempt {attempt} error: {e}")
+                if attempt < config.MAX_RETRIES:
+                    wait = 2 ** attempt
+                    print(f"  [{name}] Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                else:
+                    print(f"  [{name}] All retries exhausted")
 
-            if attempt < config.MAX_RETRIES:
-                wait = 2 ** attempt
-                print(f"  [{name}] Retrying in {wait}s...")
-                await asyncio.sleep(wait)
+        print()
 
-        print(f"  [{name}] All attempts exhausted\n")
-
-    print("\n✗ All methods failed. No video URL could be extracted.")
+    print("✗ All methods failed. No video URL could be extracted.")
     return None

@@ -10,7 +10,7 @@ import asyncio
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge
+from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
 
 
 METHOD_NAME = "nodriver"
@@ -24,8 +24,7 @@ async def scrape(episode_url: str) -> Optional[str]:
     try:
         import nodriver as uc
     except ImportError:
-        print(f"  [{METHOD_NAME}] nodriver not installed, skipping")
-        return None
+        raise SkipMethod(f"{METHOD_NAME}: nodriver not installed")
 
     print(f"  [{METHOD_NAME}] Launching stealth Chrome browser")
 

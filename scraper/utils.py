@@ -6,6 +6,14 @@ from typing import Optional
 import config
 
 
+class SkipMethod(Exception):
+    """Raised when a method cannot run at all (not installed, no API key, etc.).
+
+    The chain catches this and moves to the next method immediately — no retries.
+    """
+    pass
+
+
 def is_cloudflare_challenge(html: str) -> bool:
     """Return True if the HTML is a Cloudflare challenge page, not real content."""
     challenge_markers = [

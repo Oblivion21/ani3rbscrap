@@ -9,7 +9,7 @@ import asyncio
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict
+from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict, SkipMethod
 
 
 METHOD_NAME = "patchright"
@@ -23,8 +23,7 @@ async def scrape(episode_url: str) -> Optional[str]:
     try:
         from patchright.async_api import async_playwright
     except ImportError:
-        print(f"  [{METHOD_NAME}] patchright not installed, skipping")
-        return None
+        raise SkipMethod(f"{METHOD_NAME}: patchright not installed")
 
     print(f"  [{METHOD_NAME}] Launching patched Chromium browser")
 
@@ -60,7 +59,8 @@ async def scrape(episode_url: str) -> Optional[str]:
             page.on("response", on_response)
 
             print(f"  [{METHOD_NAME}] Navigating to {episode_url}")
-            await page.goto(episode_url, wait_until="networkidle",
+            # Use "domcontentloaded" — "networkidle" times out on CF challenge pages
+            await page.goto(episode_url, wait_until="domcontentloaded",
                             timeout=config.PAGE_LOAD_TIMEOUT * 1000)
 
             # Wait for Cloudflare challenge

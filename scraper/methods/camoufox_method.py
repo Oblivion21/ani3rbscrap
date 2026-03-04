@@ -10,7 +10,7 @@ import asyncio
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict
+from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict, SkipMethod
 
 
 METHOD_NAME = "camoufox"
@@ -24,8 +24,7 @@ async def scrape(episode_url: str) -> Optional[str]:
     try:
         from camoufox.async_api import AsyncCamoufox
     except ImportError:
-        print(f"  [{METHOD_NAME}] camoufox not installed, skipping")
-        return None
+        raise SkipMethod(f"{METHOD_NAME}: camoufox not installed")
 
     print(f"  [{METHOD_NAME}] Launching stealth Firefox browser")
 
@@ -50,7 +49,7 @@ async def scrape(episode_url: str) -> Optional[str]:
             page.on("response", on_response)
 
             print(f"  [{METHOD_NAME}] Navigating to {episode_url}")
-            await page.goto(episode_url, wait_until="networkidle",
+            await page.goto(episode_url, wait_until="domcontentloaded",
                             timeout=config.PAGE_LOAD_TIMEOUT * 1000)
 
             # Wait for Cloudflare challenge to resolve

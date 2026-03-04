@@ -9,7 +9,7 @@ import re
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge
+from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
 
 
 METHOD_NAME = "curl_cffi"
@@ -23,8 +23,7 @@ async def scrape(episode_url: str) -> Optional[str]:
     try:
         from curl_cffi import requests as cffi_requests
     except ImportError:
-        print(f"  [{METHOD_NAME}] curl_cffi not installed, skipping")
-        return None
+        raise SkipMethod(f"{METHOD_NAME}: curl_cffi not installed")
 
     print(f"  [{METHOD_NAME}] Fetching {episode_url}")
 
