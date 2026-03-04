@@ -7,6 +7,7 @@ Intercepts network requests to capture the video mp4 URL.
 """
 
 import asyncio
+import random
 from typing import Optional
 
 import config
@@ -16,10 +17,105 @@ from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
 METHOD_NAME = "nodriver"
 
 
+async def _solve_turnstile_nodriver(page, browser) -> bool:
+    """
+    Attempt to solve Cloudflare Turnstile by clicking the checkbox iframe.
+    Uses nodriver's CDP-based API.
+    Returns True if the challenge was solved.
+    """
+    await asyncio.sleep(2)
+
+    content = await page.get_content()
+    if not is_cloudflare_challenge(content):
+        print(f"  [{METHOD_NAME}] No Cloudflare challenge detected")
+        return True
+
+    print(f"  [{METHOD_NAME}] Cloudflare Turnstile detected, attempting to solve...")
+
+    # Find the Turnstile iframe and click it
+    clicked = False
+    for selector in [
+        "iframe[src*='challenges.cloudflare.com']",
+        ".cf-turnstile iframe",
+        "#turnstile-wrapper iframe",
+    ]:
+        try:
+            iframe_el = await page.query_selector(selector)
+            if iframe_el:
+                # Click with a small offset to hit the checkbox area (left side)
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await iframe_el.click()
+                print(f"  [{METHOD_NAME}] Clicked Turnstile iframe via '{selector}'")
+                clicked = True
+                break
+        except Exception as e:
+            print(f"  [{METHOD_NAME}] Selector '{selector}' failed: {e}")
+            continue
+
+    # Fallback: use JS to find and click the iframe
+    if not clicked:
+        try:
+            result = await page.evaluate("""
+                (() => {
+                    const iframe = document.querySelector(
+                        "iframe[src*='challenges.cloudflare.com']"
+                    ) || document.querySelector(".cf-turnstile iframe");
+                    if (iframe) {
+                        const rect = iframe.getBoundingClientRect();
+                        return {x: rect.x + 32, y: rect.y + rect.height / 2};
+                    }
+                    return null;
+                })()
+            """)
+            if result:
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await page.send(
+                    __import__("nodriver").cdp.input_.dispatch_mouse_event(
+                        type_="mousePressed",
+                        x=result["x"],
+                        y=result["y"],
+                        button=__import__("nodriver").cdp.input_.MouseButton("left"),
+                        click_count=1,
+                    )
+                )
+                await page.send(
+                    __import__("nodriver").cdp.input_.dispatch_mouse_event(
+                        type_="mouseReleased",
+                        x=result["x"],
+                        y=result["y"],
+                        button=__import__("nodriver").cdp.input_.MouseButton("left"),
+                        click_count=1,
+                    )
+                )
+                print(f"  [{METHOD_NAME}] Clicked Turnstile via CDP mouse event at ({result['x']:.0f}, {result['y']:.0f})")
+                clicked = True
+        except Exception as e:
+            print(f"  [{METHOD_NAME}] CDP click fallback failed: {e}")
+
+    if not clicked:
+        print(f"  [{METHOD_NAME}] Could not find Turnstile widget to click")
+        return False
+
+    # Wait for challenge to resolve
+    print(f"  [{METHOD_NAME}] Waiting for challenge to resolve...")
+    for i in range(config.CHALLENGE_WAIT):
+        await asyncio.sleep(1)
+        try:
+            content = await page.get_content()
+            if not is_cloudflare_challenge(content):
+                print(f"  [{METHOD_NAME}] Challenge solved after {i + 1}s")
+                return True
+        except Exception:
+            pass
+
+    print(f"  [{METHOD_NAME}] Challenge did not resolve within {config.CHALLENGE_WAIT}s")
+    return False
+
+
 async def scrape(episode_url: str) -> Optional[str]:
     """
     Launch a stealth Chrome browser via nodriver, navigate to the episode page,
-    and capture the mp4 video URL via CDP network events.
+    solve the Turnstile challenge, and capture the mp4 video URL via CDP.
     """
     try:
         import nodriver as uc
@@ -28,7 +124,6 @@ async def scrape(episode_url: str) -> Optional[str]:
 
     print(f"  [{METHOD_NAME}] Launching stealth Chrome browser")
 
-    captured_urls: list[str] = []
     browser = None
 
     try:
@@ -40,32 +135,18 @@ async def scrape(episode_url: str) -> Optional[str]:
 
         # Enable network domain for request interception via CDP
         page = await browser.get("about:blank")
-
-        # Set up network request monitoring via CDP
         await page.send(uc.cdp.network.enable())
-
-        # Listen for network responses containing our video pattern
-        async def monitor_network():
-            """Monitor network events for video URLs in the background."""
-            # nodriver uses CDP events; we'll check periodically via JS instead
-            pass
 
         print(f"  [{METHOD_NAME}] Navigating to {episode_url}")
         page = await browser.get(episode_url)
 
-        # Wait for Cloudflare challenge to resolve
-        print(f"  [{METHOD_NAME}] Waiting for challenge resolution...")
-        await asyncio.sleep(config.CHALLENGE_WAIT)
+        # Solve Turnstile challenge
+        solved = await _solve_turnstile_nodriver(page, browser)
+        if not solved:
+            print(f"  [{METHOD_NAME}] Failed to solve Turnstile challenge")
+            return None
 
         content = await page.get_content()
-        if is_cloudflare_challenge(content):
-            print(f"  [{METHOD_NAME}] Still on challenge page, waiting more...")
-            await asyncio.sleep(config.CHALLENGE_WAIT)
-            content = await page.get_content()
-            if is_cloudflare_challenge(content):
-                print(f"  [{METHOD_NAME}] Challenge not resolved, failing")
-                return None
-
         print(f"  [{METHOD_NAME}] Page loaded ({len(content)} chars)")
 
         # Check page source for video URL
@@ -74,8 +155,7 @@ async def scrape(episode_url: str) -> Optional[str]:
             print(f"  [{METHOD_NAME}] Found video URL in page source")
             return video_url
 
-        # Use JavaScript to monitor for video elements and network requests
-        # Inject a PerformanceObserver to capture resource URLs
+        # Inject PerformanceObserver to capture resource URLs
         await page.evaluate("""
             window.__captured_video_urls = [];
             const observer = new PerformanceObserver((list) => {
@@ -87,7 +167,6 @@ async def scrape(episode_url: str) -> Optional[str]:
             });
             observer.observe({ entryTypes: ['resource'] });
 
-            // Also check existing performance entries
             performance.getEntriesByType('resource').forEach(entry => {
                 if (entry.name.includes('vid3rb.com') && entry.name.includes('.mp4')) {
                     window.__captured_video_urls.push(entry.name);

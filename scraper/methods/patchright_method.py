@@ -9,7 +9,10 @@ import asyncio
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict, SkipMethod
+from scraper.utils import (
+    extract_video_url, is_cloudflare_challenge, get_proxy_dict,
+    SkipMethod, solve_turnstile_playwright,
+)
 
 
 METHOD_NAME = "patchright"
@@ -18,7 +21,7 @@ METHOD_NAME = "patchright"
 async def scrape(episode_url: str) -> Optional[str]:
     """
     Launch a patched Chromium browser, navigate to the episode page,
-    intercept network requests, and capture the mp4 video URL.
+    solve the Cloudflare Turnstile challenge, and capture the mp4 video URL.
     """
     try:
         from patchright.async_api import async_playwright
@@ -59,30 +62,22 @@ async def scrape(episode_url: str) -> Optional[str]:
             page.on("response", on_response)
 
             print(f"  [{METHOD_NAME}] Navigating to {episode_url}")
-            # Use "domcontentloaded" — "networkidle" times out on CF challenge pages
             await page.goto(episode_url, wait_until="domcontentloaded",
                             timeout=config.PAGE_LOAD_TIMEOUT * 1000)
 
-            # Wait for Cloudflare challenge
-            print(f"  [{METHOD_NAME}] Waiting for challenge resolution...")
-            await asyncio.sleep(config.CHALLENGE_WAIT)
-
-            content = await page.content()
-            if is_cloudflare_challenge(content):
-                print(f"  [{METHOD_NAME}] Still on challenge page, waiting more...")
-                await asyncio.sleep(config.CHALLENGE_WAIT)
-                content = await page.content()
-                if is_cloudflare_challenge(content):
-                    print(f"  [{METHOD_NAME}] Challenge not resolved, failing")
-                    await browser.close()
-                    return None
-
-            print(f"  [{METHOD_NAME}] Page loaded ({len(content)} chars)")
+            # Solve Cloudflare Turnstile if present
+            solved = await solve_turnstile_playwright(page, METHOD_NAME, max_wait=config.CHALLENGE_WAIT)
+            if not solved:
+                print(f"  [{METHOD_NAME}] Failed to solve Turnstile challenge")
+                await browser.close()
+                return None
 
             # Check if we already captured a video URL
             if captured_urls:
                 await browser.close()
                 return captured_urls[0]
+
+            print(f"  [{METHOD_NAME}] Page loaded ({len(await page.content())} chars)")
 
             # Try to find and click play button
             play_selectors = [

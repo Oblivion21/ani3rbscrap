@@ -49,3 +49,126 @@ def get_proxy_dict() -> Optional[dict]:
     if config.PROXY_PASSWORD:
         proxy["password"] = config.PROXY_PASSWORD
     return proxy
+
+
+# ────────────────────────────────────────────────────────────────
+# Cloudflare Turnstile solver (Playwright API — works with
+# camoufox, patchright, and vanilla playwright)
+# ────────────────────────────────────────────────────────────────
+
+async def solve_turnstile_playwright(page, method_name: str, max_wait: int = 30) -> bool:
+    """
+    Detect and click the Cloudflare Turnstile checkbox, then wait for the
+    challenge to resolve and the real page to load.
+
+    Args:
+        page:        Playwright Page object (works with Patchright and Camoufox too).
+        method_name: Label for log messages.
+        max_wait:    Max seconds to wait for challenge resolution after clicking.
+
+    Returns True if the challenge was solved, False otherwise.
+    """
+    import asyncio
+    import random
+
+    # Give the Turnstile widget time to render
+    await asyncio.sleep(2)
+
+    content = await page.content()
+    if not is_cloudflare_challenge(content):
+        print(f"  [{method_name}] No Cloudflare challenge detected, continuing")
+        return True  # no challenge = success
+
+    print(f"  [{method_name}] Cloudflare Turnstile detected, attempting to solve...")
+
+    clicked = False
+
+    # --- Approach 1: find the challenge iframe and click the checkbox inside ---
+    for frame in page.frames:
+        url = frame.url or ""
+        if "challenges.cloudflare.com" not in url:
+            continue
+
+        print(f"  [{method_name}] Found Turnstile iframe")
+
+        # Try the checkbox input
+        try:
+            checkbox = await frame.wait_for_selector(
+                "input[type='checkbox']", timeout=8000,
+            )
+            if checkbox:
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await checkbox.click()
+                print(f"  [{method_name}] Clicked Turnstile checkbox")
+                clicked = True
+                break
+        except Exception:
+            pass
+
+        # Try any clickable label
+        try:
+            label = await frame.query_selector("label")
+            if label:
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await label.click()
+                print(f"  [{method_name}] Clicked Turnstile label")
+                clicked = True
+                break
+        except Exception:
+            pass
+
+        # Try the body of the frame (fallback)
+        try:
+            body = await frame.query_selector("body")
+            if body:
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await body.click()
+                print(f"  [{method_name}] Clicked Turnstile frame body")
+                clicked = True
+                break
+        except Exception:
+            pass
+
+    # --- Approach 2: click the iframe element directly on the parent page ---
+    if not clicked:
+        for selector in [
+            "iframe[src*='challenges.cloudflare.com']",
+            ".cf-turnstile iframe",
+            "#turnstile-wrapper iframe",
+            "iframe[id*='cf-chl']",
+        ]:
+            try:
+                iframe_el = await page.query_selector(selector)
+                if iframe_el:
+                    bbox = await iframe_el.bounding_box()
+                    if bbox:
+                        # The checkbox is on the left side of the widget
+                        x = bbox["x"] + 32
+                        y = bbox["y"] + bbox["height"] / 2
+                        await asyncio.sleep(random.uniform(0.3, 1.0))
+                        await page.mouse.click(x, y)
+                        print(f"  [{method_name}] Clicked Turnstile iframe at ({x:.0f}, {y:.0f})")
+                        clicked = True
+                        break
+            except Exception:
+                continue
+
+    if not clicked:
+        print(f"  [{method_name}] Could not find Turnstile widget to click")
+        return False
+
+    # --- Wait for the challenge to resolve and page to navigate ---
+    print(f"  [{method_name}] Waiting for challenge to resolve (up to {max_wait}s)...")
+    for i in range(max_wait):
+        await asyncio.sleep(1)
+        try:
+            content = await page.content()
+            if not is_cloudflare_challenge(content):
+                print(f"  [{method_name}] Challenge solved after {i + 1}s")
+                return True
+        except Exception:
+            # Page might be navigating
+            pass
+
+    print(f"  [{method_name}] Challenge did not resolve within {max_wait}s")
+    return False

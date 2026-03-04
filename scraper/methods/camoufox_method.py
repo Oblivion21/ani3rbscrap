@@ -10,7 +10,10 @@ import asyncio
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, get_proxy_dict, SkipMethod
+from scraper.utils import (
+    extract_video_url, is_cloudflare_challenge, get_proxy_dict,
+    SkipMethod, solve_turnstile_playwright,
+)
 
 
 METHOD_NAME = "camoufox"
@@ -19,7 +22,7 @@ METHOD_NAME = "camoufox"
 async def scrape(episode_url: str) -> Optional[str]:
     """
     Launch a stealth Firefox browser, navigate to the episode page,
-    intercept network requests, and capture the mp4 video URL.
+    solve the Cloudflare Turnstile challenge, and capture the mp4 video URL.
     """
     try:
         from camoufox.async_api import AsyncCamoufox
@@ -52,26 +55,17 @@ async def scrape(episode_url: str) -> Optional[str]:
             await page.goto(episode_url, wait_until="domcontentloaded",
                             timeout=config.PAGE_LOAD_TIMEOUT * 1000)
 
-            # Wait for Cloudflare challenge to resolve
-            print(f"  [{METHOD_NAME}] Waiting for challenge resolution...")
-            await asyncio.sleep(config.CHALLENGE_WAIT)
+            # Solve Cloudflare Turnstile if present
+            solved = await solve_turnstile_playwright(page, METHOD_NAME, max_wait=config.CHALLENGE_WAIT)
+            if not solved:
+                print(f"  [{METHOD_NAME}] Failed to solve Turnstile challenge")
+                return None
 
-            # Check if we passed Cloudflare
-            content = await page.content()
-            if is_cloudflare_challenge(content):
-                print(f"  [{METHOD_NAME}] Still on Cloudflare challenge page")
-                # Give it more time
-                await asyncio.sleep(config.CHALLENGE_WAIT)
-                content = await page.content()
-                if is_cloudflare_challenge(content):
-                    print(f"  [{METHOD_NAME}] Challenge not resolved, failing")
-                    return None
-
-            print(f"  [{METHOD_NAME}] Page loaded ({len(content)} chars)")
-
-            # If we already captured a URL from network requests, return it
+            # Check if we already captured a URL from network requests
             if captured_urls:
                 return captured_urls[0]
+
+            print(f"  [{METHOD_NAME}] Page loaded ({len(await page.content())} chars)")
 
             # Try to find and click the play button to trigger video loading
             play_selectors = [
