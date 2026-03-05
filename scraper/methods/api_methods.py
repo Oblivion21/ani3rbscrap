@@ -286,23 +286,22 @@ async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
         print(f"  [apify_bypasser] Still got Cloudflare challenge")
         return None
 
-    # Try direct video URL first
+    # Extract player iframe URL first (most likely to be in the page)
+    player_iframe_url = extract_player_iframe_url(html_content)
+    if player_iframe_url:
+        print(f"  [apify_bypasser] Found player iframe: {player_iframe_url[:80]}...")
+        # ── Phase 2: Fetch player page for video_sources ──
+        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser", client, ACTOR_ID)
+
+    # Fallback: try direct .mp4 URL in HTML (rare but possible)
     video_url = extract_video_url(html_content)
     if video_url:
         print(f"  [apify_bypasser] Found video URL directly in HTML")
         return video_url
 
-    # Extract player iframe URL
-    player_iframe_url = extract_player_iframe_url(html_content)
-    if not player_iframe_url:
-        print(f"  [apify_bypasser] No player iframe found")
-        _debug_response("apify_bypasser", html_content)
-        return None
-
-    print(f"  [apify_bypasser] Found player iframe: {player_iframe_url[:80]}...")
-
-    # ── Phase 2: Fetch player page for video_sources ──
-    return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser", client, ACTOR_ID)
+    print(f"  [apify_bypasser] No player iframe or video URL found")
+    _debug_response("apify_bypasser", html_content)
+    return None
 
 
 # ────────────────────────────────────────────────────────────────
@@ -363,20 +362,19 @@ async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
         print(f"  [apify_scraper] Still got Cloudflare challenge")
         return None
 
+    player_iframe_url = extract_player_iframe_url(html_content)
+    if player_iframe_url:
+        print(f"  [apify_scraper] Found player iframe: {player_iframe_url[:80]}...")
+        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper", client, ACTOR_ID)
+
     video_url = extract_video_url(html_content)
     if video_url:
         print(f"  [apify_scraper] Found video URL directly in HTML")
         return video_url
 
-    player_iframe_url = extract_player_iframe_url(html_content)
-    if not player_iframe_url:
-        print(f"  [apify_scraper] No player iframe found")
-        _debug_response("apify_scraper", html_content)
-        return None
-
-    print(f"  [apify_scraper] Found player iframe: {player_iframe_url[:80]}...")
-
-    return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper", client, ACTOR_ID)
+    print(f"  [apify_scraper] No player iframe or video URL found")
+    _debug_response("apify_scraper", html_content)
+    return None
 
 
 # ────────────────────────────────────────────────────────────────

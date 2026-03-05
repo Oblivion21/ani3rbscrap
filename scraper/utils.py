@@ -37,16 +37,17 @@ def is_cloudflare_challenge(html: str) -> bool:
 
 
 def _video_url_patterns() -> list[str]:
-    """Return regex patterns that match vid3rb video URLs.
+    """Return regex patterns that match vid3rb *playable* video URLs.
 
-    Pattern 1: files.vid3rb.com/.../*.mp4  (legacy / direct file links)
-    Pattern 2: video.vid3rb.com/video/<uuid>?token=...  (streaming links)
+    Only matches files.vid3rb.com/.../*.mp4 — actual MP4 file links.
+
+    NOTE: video.vid3rb.com/video/<uuid> is a metadata/thumbnail endpoint,
+    NOT a playable video.  video.vid3rb.com/player/<uuid> is the player
+    iframe (handled by extract_player_iframe_url instead).
     """
     return [
-        # Pattern 1 — files.vid3rb.com  ...  .mp4
+        # files.vid3rb.com  ...  .mp4  (the actual playable MP4 file)
         rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN)}[^\s"\'<>]*{re.escape(config.VIDEO_FILE_EXTENSION)}[^\s"\'<>]*',
-        # Pattern 2 — video.vid3rb.com/video/<uuid>?...
-        rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN_ALT)}[^\s"\'<>]*',
     ]
 
 
