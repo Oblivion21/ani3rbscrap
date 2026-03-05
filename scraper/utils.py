@@ -15,7 +15,17 @@ class SkipMethod(Exception):
 
 
 def is_cloudflare_challenge(html: str) -> bool:
-    """Return True if the HTML is a Cloudflare challenge page, not real content."""
+    """Return True if the HTML is a Cloudflare challenge page, not real content.
+
+    We require BOTH a challenge marker AND the absence of real page content.
+    The CF challenge-platform script can appear on valid pages (passive bot
+    detection), so we only flag the page when it looks like ONLY a challenge.
+    """
+    # A real anime3rb page will have significant content — if it's short, it's
+    # likely a bare challenge interstitial.
+    if len(html) > 20_000:
+        return False
+
     challenge_markers = [
         "Just a moment",
         "Checking your browser",
@@ -60,16 +70,25 @@ def extract_all_video_urls(text: str) -> list[str]:
 def extract_player_iframe_url(html: str) -> Optional[str]:
     """Extract the vid3rb player iframe URL from HTML.
 
-    The episode page embeds the video in an iframe like:
-      <iframe src="https://video.vid3rb.com/player/<uuid>?token=...&expires=...">
-    The actual .mp4 is loaded inside that iframe when play is clicked.
+    The episode page embeds the video player URL in multiple ways:
+      1. <iframe src="https://video.vid3rb.com/player/<uuid>?token=...&expires=...">
+      2. Livewire wire:snapshot JSON: "video_url":"https:\\/\\/video.vid3rb.com\\/player\\/..."
+    The actual .mp4 is loaded inside that player when play is clicked.
     """
-    # Match iframe src pointing to vid3rb player
+    # 1. Match iframe src/href pointing to vid3rb player
     pattern = r'(?:src|href)\s*=\s*["\']?(https?://video\.vid3rb\.com/player/[^"\'>\s]+)'
     match = re.search(pattern, html)
     if match:
         url = match.group(1).replace("&amp;", "&")
         return url
+
+    # 2. Match video_url in Livewire wire:snapshot JSON (JSON-escaped slashes)
+    pattern2 = r'"video_url"\s*:\s*"(https?:\\?/\\?/video\.vid3rb\.com\\?/player\\?/[^"]+)"'
+    match2 = re.search(pattern2, html)
+    if match2:
+        url = match2.group(1).replace("\\/", "/").replace("&amp;", "&")
+        return url
+
     return None
 
 

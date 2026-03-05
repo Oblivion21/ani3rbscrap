@@ -258,12 +258,25 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
     run_input = {
         "urls": [episode_url],
         "js_script": (
+            # 1. Check for iframe with vid3rb src (dynamic Alpine.js binding)
             "var iframe = document.querySelector('iframe[src*=\"vid3rb\"]');"
-            "if (iframe) return iframe.src;"
+            "if (iframe && iframe.src) return iframe.src;"
+            # 2. Extract video_url from Livewire wire:snapshot JSON in the DOM
+            "var snapshots = document.querySelectorAll('[wire\\\\:snapshot]');"
+            "for (var i = 0; i < snapshots.length; i++) {"
+            "  try {"
+            "    var snap = JSON.parse(snapshots[i].getAttribute('wire:snapshot'));"
+            "    var url = snap && snap.data && snap.data.video_url;"
+            "    if (url && url.indexOf('vid3rb') !== -1) return url;"
+            "  } catch(e) {}"
+            "}"
+            # 3. Fallback: search raw HTML for the video_url pattern
+            "var html = document.documentElement.innerHTML;"
+            "var m = html.match(/\"video_url\"\\s*:\\s*\"(https?:[^\"]+vid3rb[^\"]+)\"/i);"
+            "if (m) return m[1].replace(/\\\\\\/\\//g, '/');"  # unescape JSON slashes -- noqa: W605
+            # 4. Direct video element check
             "var video = document.querySelector('video');"
             "if (video && video.src) return video.src;"
-            "var source = document.querySelector('video source');"
-            "if (source && source.src) return source.src;"
             "return null;"
         ),
         "retrieve_result_from_js_script": True,
