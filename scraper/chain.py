@@ -14,6 +14,7 @@ from scraper.methods.api_methods import (
     scrape_scrapfly,
     scrape_crawlbase,
     scrape_scraperapi,
+    scrape_apify,
 )
 from scraper.utils import SkipMethod
 import config
@@ -31,6 +32,7 @@ METHODS: list[tuple[str, Callable[[str], Awaitable[Optional[str]]]]] = [
     ("scrapfly",    scrape_scrapfly),
     ("crawlbase",   scrape_crawlbase),
     ("scraperapi",  scrape_scraperapi),
+    ("apify",       scrape_apify),
 ]
 
 

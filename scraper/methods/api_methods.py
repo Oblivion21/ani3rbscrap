@@ -221,3 +221,78 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
     print(f"  [scraperapi] Page loaded but no video URL found")
     _debug_response("scraperapi", resp.text)
     return None
+
+
+# ────────────────────────────────────────────────────────────────
+# Step 10 — Apify (free $5/month, no credit card)
+# Uses the "neatrat/cloudflare-scraper" Actor which handles
+# Cloudflare Turnstile automatically on Apify's cloud.
+# Sign up: https://apify.com   Token: https://console.apify.com/account/integrations
+# ────────────────────────────────────────────────────────────────
+
+async def scrape_apify(episode_url: str) -> Optional[str]:
+    """Use Apify's Cloudflare Scraper Actor to bypass Turnstile and get page HTML."""
+    if not config.APIFY_TOKEN:
+        raise SkipMethod("apify: no token in config.py (APIFY_TOKEN) — "
+                         "sign up free at https://apify.com")
+
+    try:
+        from apify_client import ApifyClient
+    except ImportError:
+        raise SkipMethod("apify: install the client first → pip install apify-client")
+
+    print(f"  [apify] Running Cloudflare Scraper Actor on Apify cloud")
+
+    client = ApifyClient(config.APIFY_TOKEN)
+
+    run_input = {
+        "urls": [episode_url],
+        # Wait for the page JS to finish loading the player
+        "waitForSelector": "video,#player,[class*='player']",
+        "waitForSelectorTimeoutSecs": 30,
+    }
+
+    try:
+        run = client.actor("neatrat/cloudflare-scraper").call(
+            run_input=run_input,
+            timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+        )
+    except Exception as e:
+        print(f"  [apify] Actor run failed: {e}")
+        return None
+
+    print(f"  [apify] Actor run finished, status: {run.get('status')}")
+
+    # Fetch results from the Actor's default dataset
+    dataset_id = run.get("defaultDatasetId")
+    if not dataset_id:
+        print(f"  [apify] No dataset returned")
+        return None
+
+    items = list(client.dataset(dataset_id).iterate_items())
+    if not items:
+        print(f"  [apify] Dataset is empty — page may not have loaded")
+        return None
+
+    # The actor returns items with "html" or "body" fields
+    for item in items:
+        html = item.get("html") or item.get("body") or item.get("content") or ""
+        if not html:
+            continue
+
+        print(f"  [apify] Got HTML: {len(html)} chars")
+
+        if is_cloudflare_challenge(html):
+            print(f"  [apify] Still got Cloudflare challenge")
+            continue
+
+        video_url = extract_video_url(html)
+        if video_url:
+            print(f"  [apify] Found video URL")
+            return video_url
+
+        print(f"  [apify] No video URL in this result")
+        _debug_response("apify", html)
+
+    print(f"  [apify] No video URL found in any result")
+    return None
