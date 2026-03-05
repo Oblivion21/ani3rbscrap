@@ -14,7 +14,8 @@ from scraper.methods.api_methods import (
     scrape_scrapfly,
     scrape_crawlbase,
     scrape_scraperapi,
-    scrape_apify,
+    scrape_apify_bypasser,
+    scrape_apify_scraper,
 )
 from scraper.utils import SkipMethod
 import config
@@ -31,8 +32,10 @@ METHODS: list[tuple[str, Callable[[str], Awaitable[Optional[str]]]]] = [
     ("scrapeops",   scrape_scrapeops),
     ("scrapfly",    scrape_scrapfly),
     ("crawlbase",   scrape_crawlbase),
-    ("scraperapi",  scrape_scraperapi),
-    ("apify",       scrape_apify),
+    ("scraperapi",      scrape_scraperapi),
+    # Apify actors — Cloudflare bypass via cloud
+    ("apify_bypasser",  scrape_apify_bypasser),
+    ("apify_scraper",   scrape_apify_scraper),
 ]
 
 

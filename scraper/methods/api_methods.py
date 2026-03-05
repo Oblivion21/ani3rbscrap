@@ -224,249 +224,284 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
 
 
 # ────────────────────────────────────────────────────────────────
-# Step 10 — Apify (free $5/month, no credit card)
-# Uses the "neatrat/cloudflare-scraper" Actor which handles
-# Cloudflare Turnstile automatically on Apify's cloud.
-# Sign up: https://apify.com   Token: https://console.apify.com/account/integrations
+# Step 10 — Apify: macheta/universal-bypasser
+# Cloudflare Bypasser — returns clean HTML + cookies after solving
+# challenges automatically.  Simple input: just a URL.
+# Free $5/month, no credit card.
 # ────────────────────────────────────────────────────────────────
 
-async def scrape_apify(episode_url: str) -> Optional[str]:
-    """Use Apify's Cloudflare Bypass Actor (24MaNvUH2R4RioZ6W) to bypass
-    Turnstile and extract the video URL.
+async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
+    """Use macheta/universal-bypasser to bypass Cloudflare and extract video URL.
 
     Two-phase approach:
-      Phase 1: Scrape the episode page.  The player URL lives inside a
-               Livewire wire:snapshot JSON attribute (video_url field).
-               The pageFunction uses $ (Cheerio/jQuery) to parse it.
-      Phase 2: Scrape the vid3rb player page.  The player page contains a
-               video_sources JS array with signed MP4 URLs for each quality.
-               We extract them with a regex on the HTML.
+      Phase 1: Bypass Cloudflare on the anime3rb episode page, get HTML,
+               extract the vid3rb player iframe URL.
+      Phase 2: Fetch the player page (usually no CF) to get video_sources MP4 URLs.
     """
     if not config.APIFY_TOKEN:
-        raise SkipMethod("apify: no token in config.py (APIFY_TOKEN) — "
+        raise SkipMethod("apify_bypasser: no token in config.py (APIFY_TOKEN) — "
                          "sign up free at https://apify.com")
 
     try:
         from apify_client import ApifyClient
     except ImportError:
-        raise SkipMethod("apify: install the client first → pip install apify-client")
+        raise SkipMethod("apify_bypasser: pip install apify-client")
 
-    import json as _json
-
-    # Cloudflare Bypass Actor — handles Turnstile automatically.
-    # pageFunction receives $ (Cheerio) — NOT browser document.
-    ACTOR_ID = "24MaNvUH2R4RioZ6W"
-
-    print(f"  [apify] Running Cloudflare Bypass Actor on Apify cloud")
+    ACTOR_ID = "macheta/universal-bypasser"
+    print(f"  [apify_bypasser] Running universal-bypasser on Apify cloud")
 
     client = ApifyClient(config.APIFY_TOKEN)
 
-    # ── Phase 1: Get the episode page to find the player iframe URL ──
-    # The player URL is in a Livewire wire:snapshot JSON attribute on the
-    # episode page (server-rendered, no JS needed).  Fallback: regex HTML.
-    phase1_page_fn = """($) => {
-        var result = {};
-        var html = $('html').html() || '';
-
-        // 1. Parse wire:snapshot attributes for video_url
-        var snapRe = /wire:snapshot="(\\{.*?\\})"/g;
-        var match;
-        while ((match = snapRe.exec(html)) !== null) {
-            try {
-                // Decode HTML entities (&quot; etc.)
-                var decoded = match[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-                var snap = JSON.parse(decoded);
-                var url = snap && snap.data && snap.data.video_url;
-                if (url && url.indexOf('vid3rb') !== -1) {
-                    return { playerUrl: url.replace(/\\\\\\//g, '/') };
-                }
-            } catch(e) {}
-        }
-
-        // 2. Regex for video_url in any JSON-like structure
-        var m = html.match(/"video_url"\\s*[=:]\\s*"(https?:[^"]*vid3rb[^"]*)"/i);
-        if (m) {
-            return { playerUrl: m[1].replace(/\\\\\\//g, '/').replace(/&amp;/g, '&') };
-        }
-
-        // 3. iframe src with vid3rb (may be set if Alpine ran)
-        var iframeSrc = $('iframe[src*="vid3rb"]').attr('src');
-        if (iframeSrc) return { playerUrl: iframeSrc.replace(/&amp;/g, '&') };
-
-        // 4. Return HTML snippet for fallback parsing
-        return { html: html.substring(0, 50000) };
-    }"""
-
-    run_input = {
-        "startUrls": [{"url": episode_url}],
-        "waitForSeconds": 10,
-        "waitForTitle": "Security Check",
-        "pageFunction": phase1_page_fn,
-        "proxyConfig": {"useApifyProxy": True},
-    }
-
+    # ── Phase 1: Bypass Cloudflare on the episode page ──
     try:
         run = client.actor(ACTOR_ID).call(
-            run_input=run_input,
+            run_input={"url": episode_url},
             timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
         )
     except Exception as e:
-        print(f"  [apify] Actor run failed: {e}")
+        print(f"  [apify_bypasser] Actor run failed: {e}")
         return None
 
-    print(f"  [apify] Phase 1 done, status: {run.get('status')}")
+    print(f"  [apify_bypasser] Phase 1 done, status: {run.get('status')}")
 
     dataset_id = run.get("defaultDatasetId")
     if not dataset_id:
-        print(f"  [apify] No dataset returned")
+        print(f"  [apify_bypasser] No dataset returned")
         return None
 
     items = list(client.dataset(dataset_id).iterate_items())
     if not items:
-        print(f"  [apify] Dataset is empty — page may not have loaded")
+        print(f"  [apify_bypasser] Dataset is empty")
         return None
 
-    player_iframe_url = None
-    for item in items:
-        # pageFunction returns {playerUrl: ...} or {html: ...}
-        player_url = item.get("playerUrl")
-        if player_url and "vid3rb" in player_url:
-            player_url = player_url.replace("&amp;", "&")
-            if ".mp4" in player_url or "files.vid3rb.com" in player_url:
-                print(f"  [apify] Found video URL directly: {player_url[:80]}...")
-                return player_url
-            player_iframe_url = player_url
-            print(f"  [apify] Found player iframe: {player_iframe_url[:80]}...")
-            break
-
-        # Fallback: parse HTML returned by pageFunction
-        html_content = item.get("html") or ""
-        if not html_content:
-            continue
-
-        print(f"  [apify] Got HTML: {len(html_content)} chars")
-
-        if is_cloudflare_challenge(html_content):
-            print(f"  [apify] Still got Cloudflare challenge")
-            continue
-
-        video_url = extract_video_url(html_content)
-        if video_url:
-            print(f"  [apify] Found video URL directly in HTML")
-            return video_url
-
-        player_iframe_url = extract_player_iframe_url(html_content)
-        if player_iframe_url:
-            print(f"  [apify] Found player iframe in HTML: {player_iframe_url[:80]}...")
-            break
-
-        _debug_response("apify", html_content)
-
-    if not player_iframe_url:
-        print(f"  [apify] No video URL or player iframe found")
+    # The actor returns items with HTML body content
+    html_content = _extract_html_from_apify_items(items)
+    if not html_content:
+        print(f"  [apify_bypasser] No HTML in response")
         return None
 
-    # ── Phase 2: Fetch the player page directly via HTTP ──
-    # The player domain (video.vid3rb.com) typically does NOT have Cloudflare.
-    # The player page serves video_sources = [{src:"...mp4?...", ...}, ...] in
-    # inline JS when fetched with the correct Referer header and session cookies.
-    # We use plain requests (not Apify) — much faster and cheaper.
-    print(f"  [apify] Phase 2: Fetching player page via HTTP for video_sources...")
+    print(f"  [apify_bypasser] Got HTML: {len(html_content)} chars")
 
-    import re as _re
-    import requests as _requests
+    if is_cloudflare_challenge(html_content):
+        print(f"  [apify_bypasser] Still got Cloudflare challenge")
+        return None
 
-    video_url = _fetch_player_video_sources(player_iframe_url, episode_url)
+    # Try direct video URL first
+    video_url = extract_video_url(html_content)
     if video_url:
+        print(f"  [apify_bypasser] Found video URL directly in HTML")
         return video_url
 
-    # ── Phase 2 fallback: Use Apify to load the player page with full JS ──
-    # If direct HTTP didn't find video_sources, the player page may need
-    # JS execution (the /js/video.js module loads sources dynamically).
-    print(f"  [apify] Phase 2 fallback: Using Apify to render player page JS...")
+    # Extract player iframe URL
+    player_iframe_url = extract_player_iframe_url(html_content)
+    if not player_iframe_url:
+        print(f"  [apify_bypasser] No player iframe found")
+        _debug_response("apify_bypasser", html_content)
+        return None
 
-    phase2_page_fn = """($) => {
-        var html = $('html').html() || '';
-        var result = { title: $('title').text(), bodyLength: html.length };
+    print(f"  [apify_bypasser] Found player iframe: {player_iframe_url[:80]}...")
 
-        // 1. Extract video_sources = [...] from inline scripts
-        var allMatches = [];
-        var re = /video_sources\\s*=\\s*(\\[.*?\\]);/gs;
-        var m;
-        while ((m = re.exec(html)) !== null) {
-            allMatches.push(m[1]);
-        }
-        if (allMatches.length > 0) {
-            for (var i = allMatches.length - 1; i >= 0; i--) {
-                if (allMatches[i].length > 5) {
-                    result.videoSources = allMatches[i];
-                    break;
-                }
-            }
-        }
+    # ── Phase 2: Fetch player page for video_sources ──
+    return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser", client, ACTOR_ID)
 
-        // 2. files.vid3rb.com MP4 URLs
-        var mp4Urls = html.match(/https?:\\/\\/files\\.vid3rb\\.com[^"'\\s<>]+\\.mp4[^"'\\s<>]*/g);
-        if (mp4Urls) result.mp4Urls = [...new Set(mp4Urls)];
 
-        // 3. video.vid3rb.com/video/ API URLs
-        var apiUrls = html.match(/https?:\\/\\/video\\.vid3rb\\.com\\/video\\/[^"'\\s<>]+/g);
-        if (apiUrls) result.apiUrls = [...new Set(apiUrls)];
+# ────────────────────────────────────────────────────────────────
+# Step 11 — Apify: zfcsoftware/scraper-api
+# Cheap ($0.10/1000 results), fast, uses trusted proxies.
+# Handles Cloudflare-protected sites automatically.
+# ────────────────────────────────────────────────────────────────
 
-        // 4. video element src
-        result.videoSrc = $('video').attr('src') || null;
+async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
+    """Use zfcsoftware/scraper-api to bypass Cloudflare and extract video URL.
 
-        return result;
-    }"""
-
-    run_input_phase2 = {
-        "startUrls": [{"url": player_iframe_url}],
-        "waitForSeconds": 10,
-        "pageFunction": phase2_page_fn,
-        "proxyConfig": {"useApifyProxy": True},
-    }
+    Same two-phase approach as apify_bypasser.
+    """
+    if not config.APIFY_TOKEN:
+        raise SkipMethod("apify_scraper: no token in config.py (APIFY_TOKEN) — "
+                         "sign up free at https://apify.com")
 
     try:
-        run2 = client.actor(ACTOR_ID).call(
-            run_input=run_input_phase2,
+        from apify_client import ApifyClient
+    except ImportError:
+        raise SkipMethod("apify_scraper: pip install apify-client")
+
+    ACTOR_ID = "zfcsoftware/scraper-api"
+    print(f"  [apify_scraper] Running scraper-api on Apify cloud")
+
+    client = ApifyClient(config.APIFY_TOKEN)
+
+    # ── Phase 1: Scrape the episode page ──
+    try:
+        run = client.actor(ACTOR_ID).call(
+            run_input={"url": episode_url},
             timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
         )
     except Exception as e:
-        print(f"  [apify] Phase 2 fallback failed: {e}")
+        print(f"  [apify_scraper] Actor run failed: {e}")
         return None
 
-    print(f"  [apify] Phase 2 fallback done, status: {run2.get('status')}")
+    print(f"  [apify_scraper] Phase 1 done, status: {run.get('status')}")
+
+    dataset_id = run.get("defaultDatasetId")
+    if not dataset_id:
+        print(f"  [apify_scraper] No dataset returned")
+        return None
+
+    items = list(client.dataset(dataset_id).iterate_items())
+    if not items:
+        print(f"  [apify_scraper] Dataset is empty")
+        return None
+
+    html_content = _extract_html_from_apify_items(items)
+    if not html_content:
+        print(f"  [apify_scraper] No HTML in response")
+        return None
+
+    print(f"  [apify_scraper] Got HTML: {len(html_content)} chars")
+
+    if is_cloudflare_challenge(html_content):
+        print(f"  [apify_scraper] Still got Cloudflare challenge")
+        return None
+
+    video_url = extract_video_url(html_content)
+    if video_url:
+        print(f"  [apify_scraper] Found video URL directly in HTML")
+        return video_url
+
+    player_iframe_url = extract_player_iframe_url(html_content)
+    if not player_iframe_url:
+        print(f"  [apify_scraper] No player iframe found")
+        _debug_response("apify_scraper", html_content)
+        return None
+
+    print(f"  [apify_scraper] Found player iframe: {player_iframe_url[:80]}...")
+
+    return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper", client, ACTOR_ID)
+
+
+# ────────────────────────────────────────────────────────────────
+# Shared helpers for Apify methods
+# ────────────────────────────────────────────────────────────────
+
+def _extract_html_from_apify_items(items: list) -> Optional[str]:
+    """Extract HTML body content from Apify actor dataset items.
+
+    Different actors return HTML in different fields. We check common ones.
+    """
+    for item in items:
+        # Common field names used by various Apify actors
+        for key in ("body", "html", "content", "text", "page_content", "result"):
+            val = item.get(key)
+            if val and isinstance(val, str) and len(val) > 100:
+                return val
+
+        # Some actors nest it under data.body or similar
+        data = item.get("data")
+        if isinstance(data, dict):
+            for key in ("body", "html", "content"):
+                val = data.get(key)
+                if val and isinstance(val, str) and len(val) > 100:
+                    return val
+
+        # If the item itself looks like it has HTML (e.g., contains <html)
+        item_str = str(item)
+        if "<html" in item_str.lower() and len(item_str) > 500:
+            # Try to find the largest string value in the item
+            best = ""
+            for v in item.values():
+                if isinstance(v, str) and len(v) > len(best):
+                    best = v
+            if best and len(best) > 100:
+                return best
+
+    return None
+
+
+def _fetch_player_and_extract(
+    player_url: str,
+    referer_url: str,
+    method_name: str,
+    client,
+    actor_id: str,
+) -> Optional[str]:
+    """Phase 2: Fetch the vid3rb player page and extract MP4 video_sources.
+
+    First tries direct HTTP (fast, free). Falls back to Apify actor if needed.
+    """
+    import json as _json
+
+    # Try direct HTTP first — player page usually has no Cloudflare
+    print(f"  [{method_name}] Phase 2: Fetching player page via HTTP...")
+    video_url = _fetch_player_video_sources(player_url, referer_url)
+    if video_url:
+        return video_url
+
+    # Fallback: Use the same Apify actor to fetch the player page
+    print(f"  [{method_name}] Phase 2 fallback: Using Apify to fetch player page...")
+    try:
+        run2 = client.actor(actor_id).call(
+            run_input={"url": player_url},
+            timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+        )
+    except Exception as e:
+        print(f"  [{method_name}] Phase 2 fallback failed: {e}")
+        return None
 
     dataset_id2 = run2.get("defaultDatasetId")
     if not dataset_id2:
         return None
 
     items2 = list(client.dataset(dataset_id2).iterate_items())
-    for item in items2:
-        video_sources_raw = item.get("videoSources")
-        if video_sources_raw:
-            try:
-                sources = _json.loads(video_sources_raw)
-                valid = [s for s in sources if s.get("src") and not s.get("premium")]
-                valid.sort(key=lambda s: int(s.get("res", 0)), reverse=True)
-                if valid:
-                    best = valid[0]["src"].replace("\\/", "/")
-                    print(f"  [apify] Got {len(valid)} sources, best: {valid[0].get('label', '?')}")
-                    return best
-            except Exception as e:
-                print(f"  [apify] Failed to parse video_sources: {e}")
+    player_html = _extract_html_from_apify_items(items2)
+    if not player_html:
+        # Also check raw item content for video URLs
+        for item in items2:
+            item_str = str(item)
+            video_url = extract_video_url(item_str)
+            if video_url:
+                print(f"  [{method_name}] Found video URL in Phase 2 item data")
+                return video_url
+        print(f"  [{method_name}] Phase 2: no HTML from actor")
+        return None
 
-        for key in ("mp4Urls", "apiUrls"):
-            urls = item.get(key) or []
-            if urls:
-                print(f"  [apify] Found URL via {key}: {urls[0][:80]}...")
-                return urls[0]
+    print(f"  [{method_name}] Phase 2: got {len(player_html)} chars from actor")
 
-        video_src = item.get("videoSrc")
-        if video_src and "vid3rb" in video_src:
-            return video_src
+    # Parse video_sources from the player HTML
+    video_url = _parse_video_sources_from_html(player_html, method_name)
+    if video_url:
+        return video_url
 
-    print(f"  [apify] Phase 2: no video URL found")
+    # Fallback: raw URL extraction
+    video_url = extract_video_url(player_html)
+    if video_url:
+        print(f"  [{method_name}] Found video URL in player HTML")
+        return video_url
+
+    print(f"  [{method_name}] Phase 2: no video URL found")
+    _debug_response(method_name, player_html)
+    return None
+
+
+def _parse_video_sources_from_html(html: str, method_name: str) -> Optional[str]:
+    """Extract the best MP4 URL from video_sources = [...] in HTML."""
+    import re as _re
+    import json as _json
+
+    matches = _re.findall(r'video_sources\s*=\s*(\[.*?\]);', html, _re.DOTALL)
+    for raw in reversed(matches):
+        if len(raw) <= 5:
+            continue
+        try:
+            sources = _json.loads(raw)
+            valid = [s for s in sources if s.get("src") and not s.get("premium")]
+            valid.sort(key=lambda s: int(s.get("res", 0)), reverse=True)
+            if valid:
+                best = valid[0]["src"].replace("\\/", "/")
+                print(f"  [{method_name}] Found {len(valid)} sources, "
+                      f"best: {valid[0].get('label', '?')}")
+                return best
+        except Exception as e:
+            print(f"  [{method_name}] Failed to parse video_sources: {e}")
     return None
 
 
