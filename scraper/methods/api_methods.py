@@ -235,10 +235,12 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
     Turnstile and extract the video URL.
 
     Two-phase approach:
-      Phase 1: Scrape the episode page. The page uses Alpine.js to bind the
-               iframe src dynamically (:src="currentVideoUrl"), so we wait
-               for it to render, then extract the vid3rb player iframe URL.
-      Phase 2: Scrape the player iframe URL to capture the .mp4 file URL.
+      Phase 1: Scrape the episode page.  The player URL lives inside a
+               Livewire wire:snapshot JSON attribute (video_url field).
+               The pageFunction uses $ (Cheerio/jQuery) to parse it.
+      Phase 2: Scrape the vid3rb player page.  The player page contains a
+               video_sources JS array with signed MP4 URLs for each quality.
+               We extract them with a regex on the HTML.
     """
     if not config.APIFY_TOKEN:
         raise SkipMethod("apify: no token in config.py (APIFY_TOKEN) — "
@@ -249,49 +251,56 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
     except ImportError:
         raise SkipMethod("apify: install the client first → pip install apify-client")
 
-    # Cloudflare Bypass Actor — handles Turnstile automatically
+    import json as _json
+
+    # Cloudflare Bypass Actor — handles Turnstile automatically.
+    # pageFunction receives $ (Cheerio) — NOT browser document.
     ACTOR_ID = "24MaNvUH2R4RioZ6W"
 
     print(f"  [apify] Running Cloudflare Bypass Actor on Apify cloud")
 
     client = ApifyClient(config.APIFY_TOKEN)
 
-    # ── Phase 1: Get the episode page to find the player iframe ──
-    # pageFunction runs in the browser after waitForSeconds.
-    # Alpine.js binds :src="currentVideoUrl" on the iframe at runtime,
-    # so the raw HTML has no src — we must wait for Alpine to init.
+    # ── Phase 1: Get the episode page to find the player iframe URL ──
+    # The player URL is in a Livewire wire:snapshot JSON attribute on the
+    # episode page (server-rendered, no JS needed).  Fallback: regex HTML.
     phase1_page_fn = """($) => {
-        // 1. Check iframe with vid3rb src (set by Alpine.js after init)
-        var iframe = document.querySelector('iframe[src*="vid3rb"]');
-        if (iframe && iframe.src) return { playerUrl: iframe.src };
+        var result = {};
+        var html = $('html').html() || '';
 
-        // 2. Livewire wire:snapshot JSON
-        var snapshots = document.querySelectorAll('[wire\\\\:snapshot]');
-        for (var i = 0; i < snapshots.length; i++) {
+        // 1. Parse wire:snapshot attributes for video_url
+        var snapRe = /wire:snapshot="(\\{.*?\\})"/g;
+        var match;
+        while ((match = snapRe.exec(html)) !== null) {
             try {
-                var snap = JSON.parse(snapshots[i].getAttribute('wire:snapshot'));
+                // Decode HTML entities (&quot; etc.)
+                var decoded = match[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+                var snap = JSON.parse(decoded);
                 var url = snap && snap.data && snap.data.video_url;
-                if (url && url.indexOf('vid3rb') !== -1)
+                if (url && url.indexOf('vid3rb') !== -1) {
                     return { playerUrl: url.replace(/\\\\\\//g, '/') };
+                }
             } catch(e) {}
         }
 
-        // 3. Regex the rendered HTML for video_url pattern
-        var html = document.documentElement.innerHTML;
-        var m = html.match(/"video_url"\\s*:\\s*"(https?:[^"]+vid3rb[^"]+)"/i);
-        if (m) return { playerUrl: m[1].replace(/\\\\\\//g, '/') };
+        // 2. Regex for video_url in any JSON-like structure
+        var m = html.match(/"video_url"\\s*[=:]\\s*"(https?:[^"]*vid3rb[^"]*)"/i);
+        if (m) {
+            return { playerUrl: m[1].replace(/\\\\\\//g, '/').replace(/&amp;/g, '&') };
+        }
 
-        // 4. Direct video element
-        var video = document.querySelector('video');
-        if (video && video.src) return { playerUrl: video.src };
+        // 3. iframe src with vid3rb (may be set if Alpine ran)
+        var iframeSrc = $('iframe[src*="vid3rb"]').attr('src');
+        if (iframeSrc) return { playerUrl: iframeSrc.replace(/&amp;/g, '&') };
 
-        // 5. Return full HTML for fallback parsing
+        // 4. Return HTML snippet for fallback parsing
         return { html: html.substring(0, 50000) };
     }"""
 
     run_input = {
         "startUrls": [{"url": episode_url}],
         "waitForSeconds": 10,
+        "waitForTitle": "Security Check",
         "pageFunction": phase1_page_fn,
         "proxyConfig": {"useApifyProxy": True},
     }
@@ -322,7 +331,6 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
         # pageFunction returns {playerUrl: ...} or {html: ...}
         player_url = item.get("playerUrl")
         if player_url and "vid3rb" in player_url:
-            # Unescape HTML entities
             player_url = player_url.replace("&amp;", "&")
             if ".mp4" in player_url or "files.vid3rb.com" in player_url:
                 print(f"  [apify] Found video URL directly: {player_url[:80]}...")
@@ -332,84 +340,83 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
             break
 
         # Fallback: parse HTML returned by pageFunction
-        html = item.get("html") or ""
-        if not html:
+        html_content = item.get("html") or ""
+        if not html_content:
             continue
 
-        print(f"  [apify] Got HTML: {len(html)} chars")
+        print(f"  [apify] Got HTML: {len(html_content)} chars")
 
-        if is_cloudflare_challenge(html):
+        if is_cloudflare_challenge(html_content):
             print(f"  [apify] Still got Cloudflare challenge")
             continue
 
-        video_url = extract_video_url(html)
+        video_url = extract_video_url(html_content)
         if video_url:
             print(f"  [apify] Found video URL directly in HTML")
             return video_url
 
-        player_iframe_url = extract_player_iframe_url(html)
+        player_iframe_url = extract_player_iframe_url(html_content)
         if player_iframe_url:
             print(f"  [apify] Found player iframe in HTML: {player_iframe_url[:80]}...")
             break
 
-        _debug_response("apify", html)
+        _debug_response("apify", html_content)
 
     if not player_iframe_url:
         print(f"  [apify] No video URL or player iframe found")
         return None
 
-    # ── Phase 2: Navigate to the player iframe and capture the .mp4 URL ──
-    print(f"  [apify] Phase 2: Scraping player iframe to capture .mp4 URL...")
+    # ── Phase 2: Scrape the vid3rb player page for video_sources ──
+    # The player page HTML contains a JS variable:
+    #   video_sources = [{src: "https://files.vid3rb.com/.../1080p.mp4?...", ...}, ...]
+    # The second occurrence is the real one (first is an empty []).
+    # We extract it with regex — no need to click play or intercept network.
+    print(f"  [apify] Phase 2: Scraping player page for video_sources...")
 
     phase2_page_fn = """($) => {
-        // Click play button
-        var selectors = [
-            'button.plyr__control--overlaid',
-            '[data-plyr="play"]',
-            '.plyr__control--overlaid',
-            '.vjs-big-play-button',
-            'button[aria-label*="Play"]',
-            'video',
-            '.play-button'
-        ];
-        for (var i = 0; i < selectors.length; i++) {
-            try {
-                var el = document.querySelector(selectors[i]);
-                if (el) { el.click(); break; }
-            } catch(e) {}
+        var html = $('html').html() || '';
+        var result = { title: $('title').text(), bodyLength: html.length };
+
+        // 1. Extract video_sources = [...] from inline scripts
+        //    There may be two matches: first is empty [], second has real URLs
+        var allMatches = [];
+        var re = /video_sources\\s*=\\s*(\\[.*?\\]);/gs;
+        var m;
+        while ((m = re.exec(html)) !== null) {
+            allMatches.push(m[1]);
+        }
+        if (allMatches.length > 0) {
+            // Take the last (non-empty) match
+            for (var i = allMatches.length - 1; i >= 0; i--) {
+                if (allMatches[i].length > 5) {
+                    result.videoSources = allMatches[i];
+                    break;
+                }
+            }
         }
 
-        // Try to play video directly
-        var vid = document.querySelector('video');
-        if (vid) try { vid.play(); } catch(e) {}
+        // 2. Look for files.vid3rb.com MP4 URLs directly
+        var mp4Urls = html.match(/https?:\\/\\/files\\.vid3rb\\.com[^"'\\s<>]+\\.mp4[^"'\\s<>]*/g);
+        if (mp4Urls) result.mp4Urls = [...new Set(mp4Urls)];
 
-        // Check video src
-        if (vid && vid.src && (vid.src.includes('.mp4') || vid.src.includes('files.vid3rb.com')))
-            return { videoUrl: vid.src };
+        // 3. video.vid3rb.com/video/ API URLs
+        var apiUrls = html.match(/https?:\\/\\/video\\.vid3rb\\.com\\/video\\/[^"'\\s<>]+/g);
+        if (apiUrls) result.apiUrls = [...new Set(apiUrls)];
 
-        // Check source element
-        var source = vid ? vid.querySelector('source') : null;
-        if (source && source.src && (source.src.includes('.mp4') || source.src.includes('files.vid3rb.com')))
-            return { videoUrl: source.src };
+        // 4. Check video element src (in case autoplay worked)
+        result.videoSrc = $('video').attr('src') || null;
 
-        // Check performance entries for .mp4 network requests
-        var entries = performance.getEntriesByType('resource');
-        for (var j = 0; j < entries.length; j++) {
-            if (entries[j].name.includes('.mp4') || entries[j].name.includes('files.vid3rb.com'))
-                return { videoUrl: entries[j].name };
-        }
+        // 5. source elements
+        var sources = [];
+        $('video source').each(function() { sources.push($(this).attr('src')); });
+        if (sources.length) result.sourceTags = sources;
 
-        // Return video src even if it doesn't match patterns (fallback)
-        if (vid && vid.src) return { videoUrl: vid.src };
-        if (source && source.src) return { videoUrl: source.src };
-
-        // Return HTML for fallback parsing
-        return { html: document.documentElement.innerHTML.substring(0, 50000) };
+        return result;
     }"""
 
     run_input_phase2 = {
         "startUrls": [{"url": player_iframe_url}],
-        "waitForSeconds": 12,
+        "waitForSeconds": 8,
         "pageFunction": phase2_page_fn,
         "proxyConfig": {"useApifyProxy": True},
     }
@@ -432,18 +439,49 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
 
     items2 = list(client.dataset(dataset_id2).iterate_items())
     for item in items2:
-        video_url = item.get("videoUrl")
-        if video_url and ("vid3rb" in video_url or ".mp4" in video_url):
-            print(f"  [apify] Captured video URL: {video_url[:80]}...")
-            return video_url
+        # 1. Parse video_sources JSON array — best quality first
+        video_sources_raw = item.get("videoSources")
+        if video_sources_raw:
+            try:
+                sources = _json.loads(video_sources_raw)
+                # Filter to non-premium sources with actual URLs, sort by resolution
+                valid = [s for s in sources if s.get("src") and not s.get("premium")]
+                valid.sort(key=lambda s: int(s.get("res", 0)), reverse=True)
+                if valid:
+                    best = valid[0]["src"].replace("\\/", "/")
+                    print(f"  [apify] Got {len(valid)} sources, best: {valid[0].get('label', '?')}")
+                    print(f"  [apify] Video URL: {best[:80]}...")
+                    return best
+            except Exception as e:
+                print(f"  [apify] Failed to parse video_sources: {e}")
 
-        # Fallback: check HTML content
-        html = item.get("html") or ""
-        if html:
-            video_url = extract_video_url(html)
-            if video_url:
-                print(f"  [apify] Found video URL in player page HTML")
-                return video_url
+        # 2. Direct MP4 URLs from regex
+        mp4_urls = item.get("mp4Urls") or []
+        if mp4_urls:
+            print(f"  [apify] Found {len(mp4_urls)} MP4 URL(s)")
+            return mp4_urls[0]
 
-    print(f"  [apify] Phase 2: no .mp4 URL captured")
+        # 3. API URLs (video.vid3rb.com/video/...)
+        api_urls = item.get("apiUrls") or []
+        if api_urls:
+            print(f"  [apify] Found video API URL: {api_urls[0][:80]}...")
+            return api_urls[0]
+
+        # 4. Video element src
+        video_src = item.get("videoSrc")
+        if video_src and "vid3rb" in video_src:
+            print(f"  [apify] Found video src: {video_src[:80]}...")
+            return video_src
+
+        # 5. Source tags
+        source_tags = item.get("sourceTags") or []
+        for src in source_tags:
+            if src and "vid3rb" in src:
+                print(f"  [apify] Found source tag: {src[:80]}...")
+                return src
+
+        print(f"  [apify] Phase 2 debug: title={item.get('title')}, "
+              f"bodyLength={item.get('bodyLength')}")
+
+    print(f"  [apify] Phase 2: no video URL found")
     return None
