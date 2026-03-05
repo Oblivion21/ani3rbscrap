@@ -10,6 +10,7 @@ import os
 # ─── Target site ───────────────────────────────────────────────
 BASE_URL = "https://anime3rb.com"
 VIDEO_HOST_PATTERN = "files.vid3rb.com"
+VIDEO_HOST_PATTERN_ALT = "video.vid3rb.com/video/"
 VIDEO_FILE_EXTENSION = ".mp4"
 
 # ─── Proxy settings (Phase 2: Step 5) ─────────────────────────

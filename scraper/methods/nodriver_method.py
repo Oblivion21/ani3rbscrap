@@ -158,9 +158,13 @@ async def scrape(episode_url: str) -> Optional[str]:
         # Inject PerformanceObserver to capture resource URLs
         await page.evaluate("""
             window.__captured_video_urls = [];
+            function _isVid3rbUrl(url) {
+                return (url.includes('files.vid3rb.com') && url.includes('.mp4'))
+                    || url.includes('video.vid3rb.com/video/');
+            }
             const observer = new PerformanceObserver((list) => {
                 for (const entry of list.getEntries()) {
-                    if (entry.name.includes('vid3rb.com') && entry.name.includes('.mp4')) {
+                    if (_isVid3rbUrl(entry.name)) {
                         window.__captured_video_urls.push(entry.name);
                     }
                 }
@@ -168,7 +172,7 @@ async def scrape(episode_url: str) -> Optional[str]:
             observer.observe({ entryTypes: ['resource'] });
 
             performance.getEntriesByType('resource').forEach(entry => {
-                if (entry.name.includes('vid3rb.com') && entry.name.includes('.mp4')) {
+                if (_isVid3rbUrl(entry.name)) {
                     window.__captured_video_urls.push(entry.name);
                 }
             });

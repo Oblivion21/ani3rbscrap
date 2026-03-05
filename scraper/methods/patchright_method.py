@@ -55,7 +55,8 @@ async def scrape(episode_url: str) -> Optional[str]:
             # Intercept network responses to capture video URLs
             async def on_response(response):
                 url = response.url
-                if config.VIDEO_HOST_PATTERN in url and config.VIDEO_FILE_EXTENSION in url:
+                if (config.VIDEO_HOST_PATTERN in url and config.VIDEO_FILE_EXTENSION in url) \
+                        or config.VIDEO_HOST_PATTERN_ALT in url:
                     captured_urls.append(url)
                     print(f"  [{METHOD_NAME}] Captured video URL from network: {url[:80]}...")
 

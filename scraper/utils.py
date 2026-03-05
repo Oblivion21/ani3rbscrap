@@ -26,17 +26,35 @@ def is_cloudflare_challenge(html: str) -> bool:
     return any(marker in html for marker in challenge_markers)
 
 
+def _video_url_patterns() -> list[str]:
+    """Return regex patterns that match vid3rb video URLs.
+
+    Pattern 1: files.vid3rb.com/.../*.mp4  (legacy / direct file links)
+    Pattern 2: video.vid3rb.com/video/<uuid>?token=...  (streaming links)
+    """
+    return [
+        # Pattern 1 — files.vid3rb.com  ...  .mp4
+        rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN)}[^\s"\'<>]*{re.escape(config.VIDEO_FILE_EXTENSION)}[^\s"\'<>]*',
+        # Pattern 2 — video.vid3rb.com/video/<uuid>?...
+        rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN_ALT)}[^\s"\'<>]*',
+    ]
+
+
 def extract_video_url(text: str) -> Optional[str]:
-    """Extract the vid3rb mp4 URL from raw text (HTML, HAR, network log, etc.)."""
-    pattern = rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN)}[^\s"\'<>]*{re.escape(config.VIDEO_FILE_EXTENSION)}[^\s"\'<>]*'
-    match = re.search(pattern, text)
-    return match.group(0) if match else None
+    """Extract the vid3rb video URL from raw text (HTML, HAR, network log, etc.)."""
+    for pattern in _video_url_patterns():
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return None
 
 
 def extract_all_video_urls(text: str) -> list[str]:
-    """Extract all vid3rb mp4 URLs from text."""
-    pattern = rf'https?://[^\s"\'<>]*{re.escape(config.VIDEO_HOST_PATTERN)}[^\s"\'<>]*{re.escape(config.VIDEO_FILE_EXTENSION)}[^\s"\'<>]*'
-    return list(set(re.findall(pattern, text)))
+    """Extract all vid3rb video URLs from text."""
+    urls: set[str] = set()
+    for pattern in _video_url_patterns():
+        urls.update(re.findall(pattern, text))
+    return list(urls)
 
 
 def get_proxy_dict() -> Optional[dict]:
