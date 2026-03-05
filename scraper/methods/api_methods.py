@@ -231,13 +231,14 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_apify(episode_url: str) -> Optional[str]:
-    """Use Apify's Cloudflare Scraper Actor (ChNuXurElMWvpbJB9) to bypass
-    Turnstile and get page HTML.
+    """Use Apify's Cloudflare Bypass Actor (24MaNvUH2R4RioZ6W) to bypass
+    Turnstile and extract the video URL.
 
     Two-phase approach:
-      Phase 1: Scrape the episode page to extract the vid3rb player iframe URL.
-      Phase 2: Scrape the player iframe URL with a JS script that clicks play
-               and captures the .mp4 file URL from network requests or video src.
+      Phase 1: Scrape the episode page. The page uses Alpine.js to bind the
+               iframe src dynamically (:src="currentVideoUrl"), so we wait
+               for it to render, then extract the vid3rb player iframe URL.
+      Phase 2: Scrape the player iframe URL to capture the .mp4 file URL.
     """
     if not config.APIFY_TOKEN:
         raise SkipMethod("apify: no token in config.py (APIFY_TOKEN) — "
@@ -248,60 +249,51 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
     except ImportError:
         raise SkipMethod("apify: install the client first → pip install apify-client")
 
-    ACTOR_ID = "ChNuXurElMWvpbJB9"
+    # Cloudflare Bypass Actor — handles Turnstile automatically
+    ACTOR_ID = "24MaNvUH2R4RioZ6W"
 
-    print(f"  [apify] Running Cloudflare Scraper Actor on Apify cloud")
+    print(f"  [apify] Running Cloudflare Bypass Actor on Apify cloud")
 
     client = ApifyClient(config.APIFY_TOKEN)
 
-    # ── Phase 1: Get the episode page HTML to find the player iframe ──
-    # Async JS that polls for up to 10s waiting for Alpine.js to bind the
-    # iframe src.  Alpine runs after DOMContentLoaded and sets :src on the
-    # iframe — the raw HTML only has :src="currentVideoUrl" with no src attr.
-    phase1_js = (
-        "return new Promise(function(resolve) {"
-        "  var checks = 0;"
-        "  var interval = setInterval(function() {"
-        "    checks++;"
-        # 1. iframe[src*="vid3rb"] — set by Alpine.js after init
-        "    var iframe = document.querySelector('iframe[src*=\"vid3rb\"]');"
-        "    if (iframe && iframe.src) { clearInterval(interval); resolve(iframe.src); return; }"
-        # 2. Livewire wire:snapshot JSON
-        "    var snapshots = document.querySelectorAll('[wire\\\\:snapshot]');"
-        "    for (var i = 0; i < snapshots.length; i++) {"
-        "      try {"
-        "        var snap = JSON.parse(snapshots[i].getAttribute('wire:snapshot'));"
-        "        var url = snap && snap.data && snap.data.video_url;"
-        "        if (url && url.indexOf('vid3rb') !== -1) {"
-        "          clearInterval(interval); resolve(url.replace(/\\\\\\\\/\\\\//g, '/')); return;"
-        "        }"
-        "      } catch(e) {}"
-        "    }"
-        # 3. Regex raw HTML for video_url pattern
-        "    var html = document.documentElement.innerHTML;"
-        "    var m = html.match(/\"video_url\"\\s*:\\s*\"(https?:[^\"]+vid3rb[^\"]+)\"/i);"
-        "    if (m) { clearInterval(interval); resolve(m[1].replace(/\\\\\\\\/\\\\//g, '/')); return; }"
-        # 4. Direct video element
-        "    var video = document.querySelector('video');"
-        "    if (video && video.src && video.src.indexOf('vid3rb') !== -1) {"
-        "      clearInterval(interval); resolve(video.src); return;"
-        "    }"
-        # Timeout after ~10 seconds (20 checks × 500ms)
-        "    if (checks >= 20) { clearInterval(interval); resolve(null); }"
-        "  }, 500);"
-        "});"
-    )
+    # ── Phase 1: Get the episode page to find the player iframe ──
+    # pageFunction runs in the browser after waitForSeconds.
+    # Alpine.js binds :src="currentVideoUrl" on the iframe at runtime,
+    # so the raw HTML has no src — we must wait for Alpine to init.
+    phase1_page_fn = """($) => {
+        // 1. Check iframe with vid3rb src (set by Alpine.js after init)
+        var iframe = document.querySelector('iframe[src*="vid3rb"]');
+        if (iframe && iframe.src) return { playerUrl: iframe.src };
+
+        // 2. Livewire wire:snapshot JSON
+        var snapshots = document.querySelectorAll('[wire\\\\:snapshot]');
+        for (var i = 0; i < snapshots.length; i++) {
+            try {
+                var snap = JSON.parse(snapshots[i].getAttribute('wire:snapshot'));
+                var url = snap && snap.data && snap.data.video_url;
+                if (url && url.indexOf('vid3rb') !== -1)
+                    return { playerUrl: url.replace(/\\\\\\//g, '/') };
+            } catch(e) {}
+        }
+
+        // 3. Regex the rendered HTML for video_url pattern
+        var html = document.documentElement.innerHTML;
+        var m = html.match(/"video_url"\\s*:\\s*"(https?:[^"]+vid3rb[^"]+)"/i);
+        if (m) return { playerUrl: m[1].replace(/\\\\\\//g, '/') };
+
+        // 4. Direct video element
+        var video = document.querySelector('video');
+        if (video && video.src) return { playerUrl: video.src };
+
+        // 5. Return full HTML for fallback parsing
+        return { html: html.substring(0, 50000) };
+    }"""
 
     run_input = {
-        "urls": [episode_url],
-        "js_script": phase1_js,
-        "retrieve_result_from_js_script": True,
-        "page_is_loaded_before_running_script": True,
-        "execute_js_async": True,
-        "retrieve_html_from_url_after_loaded": True,
-        "js_timeout": 15,
-        "max_retries_per_url": 2,
-        "proxy": {"useApifyProxy": False},
+        "startUrls": [{"url": episode_url}],
+        "waitForSeconds": 10,
+        "pageFunction": phase1_page_fn,
+        "proxyConfig": {"useApifyProxy": True},
     }
 
     try:
@@ -327,19 +319,20 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
 
     player_iframe_url = None
     for item in items:
-        # Check JS script result first (returns the iframe src directly)
-        js_result = item.get("js_result") or item.get("result")
-        if js_result and isinstance(js_result, str) and "vid3rb" in js_result:
-            # If it's already a .mp4 URL, return directly
-            if ".mp4" in js_result or "files.vid3rb.com" in js_result:
-                print(f"  [apify] Found video URL from JS: {js_result[:80]}...")
-                return js_result
-            player_iframe_url = js_result
-            print(f"  [apify] Found player iframe from JS: {player_iframe_url[:80]}...")
+        # pageFunction returns {playerUrl: ...} or {html: ...}
+        player_url = item.get("playerUrl")
+        if player_url and "vid3rb" in player_url:
+            # Unescape HTML entities
+            player_url = player_url.replace("&amp;", "&")
+            if ".mp4" in player_url or "files.vid3rb.com" in player_url:
+                print(f"  [apify] Found video URL directly: {player_url[:80]}...")
+                return player_url
+            player_iframe_url = player_url
+            print(f"  [apify] Found player iframe: {player_iframe_url[:80]}...")
             break
 
-        # Fallback: parse the returned HTML
-        html = item.get("html") or item.get("body") or item.get("content") or ""
+        # Fallback: parse HTML returned by pageFunction
+        html = item.get("html") or ""
         if not html:
             continue
 
@@ -368,69 +361,57 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
     # ── Phase 2: Navigate to the player iframe and capture the .mp4 URL ──
     print(f"  [apify] Phase 2: Scraping player iframe to capture .mp4 URL...")
 
-    # Async JS that clicks play and polls for the .mp4 src
-    player_js = (
-        "var selectors = ["
-        "  'button.plyr__control--overlaid',"
-        "  '[data-plyr=\"play\"]',"
-        "  '.plyr__control--overlaid',"
-        "  '.vjs-big-play-button',"
-        "  'button[aria-label*=\"Play\"]',"
-        "  'video',"
-        "  '.play-button'"
-        "];"
-        "for (var i = 0; i < selectors.length; i++) {"
-        "  try {"
-        "    var el = document.querySelector(selectors[i]);"
-        "    if (el) { el.click(); break; }"
-        "  } catch(e) {}"
-        "}"
-        "var vid = document.querySelector('video');"
-        "if (vid) try { vid.play(); } catch(e) {}"
-        ""
-        "return new Promise(function(resolve) {"
-        "  var checks = 0;"
-        "  var interval = setInterval(function() {"
-        "    checks++;"
-        "    var v = document.querySelector('video');"
-        "    if (v && v.src && (v.src.includes('.mp4') || v.src.includes('files.vid3rb.com'))) {"
-        "      clearInterval(interval);"
-        "      resolve(v.src);"
-        "      return;"
-        "    }"
-        "    var s = document.querySelector('video source');"
-        "    if (s && s.src && (s.src.includes('.mp4') || s.src.includes('files.vid3rb.com'))) {"
-        "      clearInterval(interval);"
-        "      resolve(s.src);"
-        "      return;"
-        "    }"
-        "    var entries = performance.getEntriesByType('resource');"
-        "    for (var j = 0; j < entries.length; j++) {"
-        "      if (entries[j].name.includes('.mp4') || entries[j].name.includes('files.vid3rb.com')) {"
-        "        clearInterval(interval);"
-        "        resolve(entries[j].name);"
-        "        return;"
-        "      }"
-        "    }"
-        "    if (checks >= 15) {"
-        "      clearInterval(interval);"
-        "      var fallback = v ? (v.src || (v.querySelector('source') ? v.querySelector('source').src : null)) : null;"
-        "      resolve(fallback);"
-        "    }"
-        "  }, 1000);"
-        "});"
-    )
+    phase2_page_fn = """($) => {
+        // Click play button
+        var selectors = [
+            'button.plyr__control--overlaid',
+            '[data-plyr="play"]',
+            '.plyr__control--overlaid',
+            '.vjs-big-play-button',
+            'button[aria-label*="Play"]',
+            'video',
+            '.play-button'
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            try {
+                var el = document.querySelector(selectors[i]);
+                if (el) { el.click(); break; }
+            } catch(e) {}
+        }
+
+        // Try to play video directly
+        var vid = document.querySelector('video');
+        if (vid) try { vid.play(); } catch(e) {}
+
+        // Check video src
+        if (vid && vid.src && (vid.src.includes('.mp4') || vid.src.includes('files.vid3rb.com')))
+            return { videoUrl: vid.src };
+
+        // Check source element
+        var source = vid ? vid.querySelector('source') : null;
+        if (source && source.src && (source.src.includes('.mp4') || source.src.includes('files.vid3rb.com')))
+            return { videoUrl: source.src };
+
+        // Check performance entries for .mp4 network requests
+        var entries = performance.getEntriesByType('resource');
+        for (var j = 0; j < entries.length; j++) {
+            if (entries[j].name.includes('.mp4') || entries[j].name.includes('files.vid3rb.com'))
+                return { videoUrl: entries[j].name };
+        }
+
+        // Return video src even if it doesn't match patterns (fallback)
+        if (vid && vid.src) return { videoUrl: vid.src };
+        if (source && source.src) return { videoUrl: source.src };
+
+        // Return HTML for fallback parsing
+        return { html: document.documentElement.innerHTML.substring(0, 50000) };
+    }"""
 
     run_input_phase2 = {
-        "urls": [player_iframe_url],
-        "js_script": player_js,
-        "retrieve_result_from_js_script": True,
-        "page_is_loaded_before_running_script": True,
-        "execute_js_async": True,
-        "retrieve_html_from_url_after_loaded": True,
-        "js_timeout": 20,
-        "max_retries_per_url": 2,
-        "proxy": {"useApifyProxy": False},
+        "startUrls": [{"url": player_iframe_url}],
+        "waitForSeconds": 12,
+        "pageFunction": phase2_page_fn,
+        "proxyConfig": {"useApifyProxy": True},
     }
 
     try:
@@ -451,14 +432,13 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
 
     items2 = list(client.dataset(dataset_id2).iterate_items())
     for item in items2:
-        # Check JS result for the .mp4 URL
-        js_result = item.get("js_result") or item.get("result")
-        if js_result and isinstance(js_result, str) and ("vid3rb" in js_result or ".mp4" in js_result):
-            print(f"  [apify] Captured .mp4 URL from JS: {js_result[:80]}...")
-            return js_result
+        video_url = item.get("videoUrl")
+        if video_url and ("vid3rb" in video_url or ".mp4" in video_url):
+            print(f"  [apify] Captured video URL: {video_url[:80]}...")
+            return video_url
 
         # Fallback: check HTML content
-        html = item.get("html") or item.get("body") or item.get("content") or ""
+        html = item.get("html") or ""
         if html:
             video_url = extract_video_url(html)
             if video_url:
