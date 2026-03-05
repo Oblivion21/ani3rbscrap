@@ -11,7 +11,10 @@ import random
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
+from scraper.utils import (
+    extract_video_url, extract_player_iframe_url, is_cloudflare_challenge,
+    SkipMethod, PLAYER_INTERCEPT_JS,
+)
 
 
 METHOD_NAME = "nodriver"
@@ -149,13 +152,40 @@ async def scrape(episode_url: str) -> Optional[str]:
         content = await page.get_content()
         print(f"  [{METHOD_NAME}] Page loaded ({len(content)} chars)")
 
-        # Check page source for video URL
+        # Check page source for direct video URL
         video_url = extract_video_url(content)
         if video_url:
             print(f"  [{METHOD_NAME}] Found video URL in page source")
             return video_url
 
-        # Inject PerformanceObserver to capture resource URLs
+        # --- Strategy: find the vid3rb player iframe and navigate into it ---
+        player_iframe_url = extract_player_iframe_url(content)
+
+        if player_iframe_url:
+            print(f"  [{METHOD_NAME}] Found player iframe: {player_iframe_url[:80]}...")
+
+            # Navigate to the player iframe URL in a new tab
+            player_page = await browser.get(player_iframe_url)
+            await asyncio.sleep(3)
+
+            # Inject JS that clicks play and intercepts .mp4 network requests
+            print(f"  [{METHOD_NAME}] Injecting play + network intercept script...")
+            try:
+                mp4_url = await player_page.evaluate(PLAYER_INTERCEPT_JS)
+                if mp4_url:
+                    print(f"  [{METHOD_NAME}] Got .mp4 URL from player JS: {mp4_url[:80]}...")
+                    return mp4_url
+            except Exception as e:
+                print(f"  [{METHOD_NAME}] Player JS error: {e}")
+
+            # Check player page source
+            player_content = await player_page.get_content()
+            video_url = extract_video_url(player_content)
+            if video_url:
+                print(f"  [{METHOD_NAME}] Found video URL in player page source")
+                return video_url
+
+        # --- Fallback: PerformanceObserver on main page ---
         await page.evaluate("""
             window.__captured_video_urls = [];
             function _isVid3rbUrl(url) {
@@ -178,7 +208,7 @@ async def scrape(episode_url: str) -> Optional[str]:
             });
         """)
 
-        # Try to find and click play button
+        # Try to find and click play button on main page
         play_selectors = [
             "button.play-button",
             ".plyr__control--overlaid",
@@ -205,7 +235,6 @@ async def scrape(episode_url: str) -> Optional[str]:
         for _ in range(config.NETWORK_IDLE_TIMEOUT):
             await asyncio.sleep(1)
 
-            # Check via JS PerformanceObserver
             try:
                 urls = await page.evaluate("window.__captured_video_urls || []")
                 if urls:
@@ -214,7 +243,6 @@ async def scrape(episode_url: str) -> Optional[str]:
             except Exception:
                 pass
 
-            # Check for video element src
             try:
                 video_src = await page.evaluate("""
                     (() => {
@@ -232,13 +260,6 @@ async def scrape(episode_url: str) -> Optional[str]:
                     return video_src
             except Exception:
                 pass
-
-        # Final check on full page content
-        content = await page.get_content()
-        video_url = extract_video_url(content)
-        if video_url:
-            print(f"  [{METHOD_NAME}] Found video URL in final page source")
-            return video_url
 
         print(f"  [{METHOD_NAME}] No video URL captured")
         return None

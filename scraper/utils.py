@@ -57,6 +57,104 @@ def extract_all_video_urls(text: str) -> list[str]:
     return list(urls)
 
 
+def extract_player_iframe_url(html: str) -> Optional[str]:
+    """Extract the vid3rb player iframe URL from HTML.
+
+    The episode page embeds the video in an iframe like:
+      <iframe src="https://video.vid3rb.com/player/<uuid>?token=...&expires=...">
+    The actual .mp4 is loaded inside that iframe when play is clicked.
+    """
+    # Match iframe src pointing to vid3rb player
+    pattern = r'(?:src|href)\s*=\s*["\']?(https?://video\.vid3rb\.com/player/[^"\'>\s]+)'
+    match = re.search(pattern, html)
+    if match:
+        url = match.group(1).replace("&amp;", "&")
+        return url
+    return None
+
+
+# JS snippet that browser methods inject into the player iframe page.
+# It sets up network interception, clicks play, and polls until an .mp4 URL is found.
+PLAYER_INTERCEPT_JS = """
+() => {
+    return new Promise((resolve) => {
+        // Capture via PerformanceObserver
+        window.__mp4_url = null;
+        function checkUrl(url) {
+            if (url && (url.includes('.mp4') || url.includes('files.vid3rb.com'))) {
+                window.__mp4_url = url;
+                resolve(url);
+                return true;
+            }
+            return false;
+        }
+
+        // Check existing resources first
+        performance.getEntriesByType('resource').forEach(e => checkUrl(e.name));
+        if (window.__mp4_url) return;
+
+        // Watch for new resources
+        const obs = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+                if (checkUrl(entry.name)) return;
+            }
+        });
+        obs.observe({ entryTypes: ['resource'] });
+
+        // Override XHR and fetch to catch .mp4 requests
+        const origFetch = window.fetch;
+        window.fetch = function(...args) {
+            if (args[0] && checkUrl(typeof args[0] === 'string' ? args[0] : args[0].url)) {}
+            return origFetch.apply(this, args);
+        };
+
+        const origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+            checkUrl(url);
+            return origOpen.apply(this, arguments);
+        };
+
+        // Try clicking play
+        const playSelectors = [
+            'button.plyr__control--overlaid',
+            '[data-plyr="play"]',
+            '.plyr__control--overlaid',
+            '.vjs-big-play-button',
+            'button[aria-label*="Play"]',
+            'button[aria-label*="play"]',
+            'video',
+            '.play-button',
+            '#player',
+        ];
+        for (const sel of playSelectors) {
+            try {
+                const el = document.querySelector(sel);
+                if (el) { el.click(); break; }
+            } catch(e) {}
+        }
+
+        // Also try to play video element directly
+        const vid = document.querySelector('video');
+        if (vid) {
+            vid.play().catch(() => {});
+            // Check video src directly
+            if (checkUrl(vid.src)) return;
+            if (vid.querySelector('source') && checkUrl(vid.querySelector('source').src)) return;
+        }
+
+        // Timeout after 15s
+        setTimeout(() => {
+            // Last resort: check video element
+            const v = document.querySelector('video');
+            if (v && v.src) resolve(v.src);
+            else if (v && v.querySelector('source')) resolve(v.querySelector('source').src);
+            else resolve(null);
+        }, 15000);
+    });
+}
+"""
+
+
 def get_proxy_dict() -> Optional[dict]:
     """Build a proxy config dict from config.py settings. Returns None if unset."""
     if not config.PROXY_SERVER:

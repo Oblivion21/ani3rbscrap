@@ -11,8 +11,8 @@ from typing import Optional
 
 import config
 from scraper.utils import (
-    extract_video_url, is_cloudflare_challenge, get_proxy_dict,
-    SkipMethod, solve_turnstile_playwright,
+    extract_video_url, extract_player_iframe_url, is_cloudflare_challenge,
+    get_proxy_dict, SkipMethod, solve_turnstile_playwright, PLAYER_INTERCEPT_JS,
 )
 
 
@@ -66,9 +66,51 @@ async def scrape(episode_url: str) -> Optional[str]:
             if captured_urls:
                 return captured_urls[0]
 
-            print(f"  [{METHOD_NAME}] Page loaded ({len(await page.content())} chars)")
+            content = await page.content()
+            print(f"  [{METHOD_NAME}] Page loaded ({len(content)} chars)")
 
-            # Try to find and click the play button to trigger video loading
+            # Check page source for direct video URL
+            video_url = extract_video_url(content)
+            if video_url:
+                print(f"  [{METHOD_NAME}] Found video URL in page source")
+                return video_url
+
+            # --- Strategy: find the vid3rb player iframe and navigate into it ---
+            player_iframe_url = extract_player_iframe_url(content)
+
+            if player_iframe_url:
+                print(f"  [{METHOD_NAME}] Found player iframe: {player_iframe_url[:80]}...")
+
+                # Open a new page for the player iframe URL
+                player_page = await browser.new_page()
+                player_page.on("response", on_response)
+
+                await player_page.goto(player_iframe_url, wait_until="domcontentloaded",
+                                       timeout=config.PAGE_LOAD_TIMEOUT * 1000)
+                await asyncio.sleep(3)
+
+                # Inject JS that clicks play and intercepts .mp4 network requests
+                print(f"  [{METHOD_NAME}] Injecting play + network intercept script...")
+                try:
+                    mp4_url = await player_page.evaluate(PLAYER_INTERCEPT_JS)
+                    if mp4_url:
+                        print(f"  [{METHOD_NAME}] Got .mp4 URL from player JS: {mp4_url[:80]}...")
+                        return mp4_url
+                except Exception as e:
+                    print(f"  [{METHOD_NAME}] Player JS error: {e}")
+
+                # Check if network interception caught it
+                if captured_urls:
+                    return captured_urls[0]
+
+                # Check player page source
+                player_content = await player_page.content()
+                video_url = extract_video_url(player_content)
+                if video_url:
+                    print(f"  [{METHOD_NAME}] Found video URL in player page source")
+                    return video_url
+
+            # --- Fallback: try clicking play on main page ---
             play_selectors = [
                 "button.play-button",
                 ".plyr__control--overlaid",
@@ -96,13 +138,6 @@ async def scrape(episode_url: str) -> Optional[str]:
                 if captured_urls:
                     return captured_urls[0]
                 await asyncio.sleep(1)
-
-            # Last resort: check page source for video URL
-            content = await page.content()
-            video_url = extract_video_url(content)
-            if video_url:
-                print(f"  [{METHOD_NAME}] Found video URL in page source")
-                return video_url
 
             print(f"  [{METHOD_NAME}] No video URL captured")
             return None

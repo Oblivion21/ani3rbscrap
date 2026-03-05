@@ -9,7 +9,7 @@ full JS-rendering + challenge-solving pipeline.
 from typing import Optional
 
 import config
-from scraper.utils import extract_video_url, is_cloudflare_challenge, SkipMethod
+from scraper.utils import extract_video_url, extract_player_iframe_url, is_cloudflare_challenge, SkipMethod
 
 
 def _debug_response(name: str, text: str):
@@ -231,7 +231,13 @@ async def scrape_scraperapi(episode_url: str) -> Optional[str]:
 # ────────────────────────────────────────────────────────────────
 
 async def scrape_apify(episode_url: str) -> Optional[str]:
-    """Use Apify's Cloudflare Scraper Actor to bypass Turnstile and get page HTML."""
+    """Use Apify's Cloudflare Scraper Actor to bypass Turnstile and get page HTML.
+
+    Two-phase approach:
+      Phase 1: Scrape the episode page to extract the vid3rb player iframe URL.
+      Phase 2: Scrape the player iframe URL with a custom script that clicks play
+               and listens to network requests until it captures the .mp4 file URL.
+    """
     if not config.APIFY_TOKEN:
         raise SkipMethod("apify: no token in config.py (APIFY_TOKEN) — "
                          "sign up free at https://apify.com")
@@ -245,10 +251,10 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
 
     client = ApifyClient(config.APIFY_TOKEN)
 
+    # ── Phase 1: Get the episode page HTML to find the player iframe ──
     run_input = {
         "urls": [episode_url],
-        # Wait for the page JS to finish loading the player
-        "waitForSelector": "video,#player,[class*='player']",
+        "waitForSelector": "iframe[src*='vid3rb'],video,#player,[class*='player']",
         "waitForSelectorTimeoutSecs": 30,
     }
 
@@ -261,9 +267,8 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
         print(f"  [apify] Actor run failed: {e}")
         return None
 
-    print(f"  [apify] Actor run finished, status: {run.get('status')}")
+    print(f"  [apify] Phase 1 done, status: {run.get('status')}")
 
-    # Fetch results from the Actor's default dataset
     dataset_id = run.get("defaultDatasetId")
     if not dataset_id:
         print(f"  [apify] No dataset returned")
@@ -274,7 +279,8 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
         print(f"  [apify] Dataset is empty — page may not have loaded")
         return None
 
-    # The actor returns items with "html" or "body" fields
+    # Try to find video URL directly or extract player iframe URL
+    player_iframe_url = None
     for item in items:
         html = item.get("html") or item.get("body") or item.get("content") or ""
         if not html:
@@ -286,13 +292,129 @@ async def scrape_apify(episode_url: str) -> Optional[str]:
             print(f"  [apify] Still got Cloudflare challenge")
             continue
 
+        # Check for direct video URL first
         video_url = extract_video_url(html)
         if video_url:
-            print(f"  [apify] Found video URL")
+            print(f"  [apify] Found video URL directly")
             return video_url
 
-        print(f"  [apify] No video URL in this result")
+        # Extract the player iframe URL
+        player_iframe_url = extract_player_iframe_url(html)
+        if player_iframe_url:
+            print(f"  [apify] Found player iframe: {player_iframe_url[:80]}...")
+            break
+
         _debug_response("apify", html)
 
-    print(f"  [apify] No video URL found in any result")
+    if not player_iframe_url:
+        print(f"  [apify] No video URL or player iframe found")
+        return None
+
+    # ── Phase 2: Navigate to the player iframe and capture the .mp4 URL ──
+    # Use a custom script that clicks play and listens for network requests
+    print(f"  [apify] Phase 2: Scraping player iframe to capture .mp4 URL...")
+
+    # The script that runs inside the player page after it loads:
+    # 1. Sets up PerformanceObserver + fetch/XHR interception
+    # 2. Clicks the play button
+    # 3. Waits until .mp4 URL is captured or timeout
+    # 4. Returns the result
+    player_script = """
+        async function pageFunction(context) {
+            const { page, request } = context;
+
+            // Listen to all network responses for .mp4 files
+            let mp4Url = null;
+            page.on('response', (response) => {
+                const url = response.url();
+                if (url.includes('.mp4') || url.includes('files.vid3rb.com')) {
+                    mp4Url = url;
+                }
+            });
+
+            // Wait for page to settle
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Click play button via JS
+            await page.evaluate(() => {
+                const selectors = [
+                    'button.plyr__control--overlaid',
+                    '[data-plyr="play"]',
+                    '.plyr__control--overlaid',
+                    '.vjs-big-play-button',
+                    'button[aria-label*="Play"]',
+                    'video',
+                    '.play-button',
+                ];
+                for (const sel of selectors) {
+                    try {
+                        const el = document.querySelector(sel);
+                        if (el) { el.click(); break; }
+                    } catch(e) {}
+                }
+                // Also try video.play()
+                const vid = document.querySelector('video');
+                if (vid) vid.play().catch(() => {});
+            });
+
+            // Wait up to 15 seconds for .mp4 to appear
+            for (let i = 0; i < 15; i++) {
+                if (mp4Url) return { mp4Url };
+                await new Promise(r => setTimeout(r, 1000));
+            }
+
+            // Fallback: check video element src
+            const videoSrc = await page.evaluate(() => {
+                const v = document.querySelector('video');
+                if (v && v.src) return v.src;
+                const s = document.querySelector('video source');
+                if (s && s.src) return s.src;
+                return null;
+            });
+
+            return { mp4Url: mp4Url || videoSrc, html: await page.content() };
+        }
+    """
+
+    run_input_phase2 = {
+        "urls": [player_iframe_url],
+        "waitForSelector": "video,.plyr,#player,[class*='player']",
+        "waitForSelectorTimeoutSecs": 30,
+        # Custom page function to interact with the player
+        "pageFunction": player_script,
+    }
+
+    try:
+        run2 = client.actor("neatrat/cloudflare-scraper").call(
+            run_input=run_input_phase2,
+            timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+        )
+    except Exception as e:
+        print(f"  [apify] Phase 2 actor run failed: {e}")
+        return None
+
+    print(f"  [apify] Phase 2 done, status: {run2.get('status')}")
+
+    dataset_id2 = run2.get("defaultDatasetId")
+    if not dataset_id2:
+        print(f"  [apify] Phase 2: no dataset returned")
+        return None
+
+    items2 = list(client.dataset(dataset_id2).iterate_items())
+    for item in items2:
+        # Check if the custom pageFunction returned an mp4Url
+        mp4_url = item.get("mp4Url")
+        if mp4_url and "vid3rb" in mp4_url:
+            print(f"  [apify] Captured .mp4 URL from player: {mp4_url[:80]}...")
+            return mp4_url
+
+        # Fallback: check HTML content
+        html = item.get("html") or item.get("body") or item.get("content") or ""
+        if html:
+            video_url = extract_video_url(html)
+            if video_url:
+                print(f"  [apify] Found video URL in player page HTML")
+                return video_url
+
+    print(f"  [apify] Phase 2: no .mp4 URL captured")
     return None
