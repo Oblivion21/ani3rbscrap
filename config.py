@@ -18,13 +18,6 @@ PROXY_SERVER = os.environ.get("PROXY_SERVER") or "https://geo.iproyal.com:12321"
 PROXY_USERNAME = os.environ.get("PROXY_USERNAME") or "zjAfVmcBG4oxZVuc"
 PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD") or "kBie3DT0JM6Dfbqb"
 
-# ─── Paid API keys (Phase 3: Steps 6–9) ───────────────────────
-# Your keys are set directly below. Env vars override if set.
-SCRAPEOPS_API_KEY = os.environ.get("SCRAPEOPS_API_KEY") or "2be635e7-d1a2-4043-adf0-4b1aef27ad6a"
-SCRAPFLY_API_KEY = os.environ.get("SCRAPFLY_API_KEY") or "scp-live-c1d72453a9034f8ba2f8669dbe77c8ad"
-CRAWLBASE_TOKEN = os.environ.get("CRAWLBASE_TOKEN") or "DfAaR8PH5yagMYYggIESWQ"
-SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY") or "29e43c18d4b6d6e4b0e37c1758ef57eb"
-
 # Apify — free $5/month, no credit card needed
 # Get your token at: https://console.apify.com/account/integrations
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN") or ""
