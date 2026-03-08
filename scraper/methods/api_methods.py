@@ -256,7 +256,10 @@ async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
     try:
         run = client.actor(ACTOR_ID).call(
             run_input={"url": episode_url},
+            max_items=1,
             timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            wait_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            logger=None,
         )
     except Exception as e:
         print(f"  [apify_bypasser] Actor run failed: {e}")
@@ -269,7 +272,7 @@ async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
         print(f"  [apify_bypasser] No dataset returned")
         return None
 
-    items = list(client.dataset(dataset_id).iterate_items())
+    items = _take_dataset_items(client.dataset(dataset_id))
     if not items:
         print(f"  [apify_bypasser] Dataset is empty")
         return None
@@ -290,8 +293,7 @@ async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
     player_iframe_url = extract_player_iframe_url(html_content)
     if player_iframe_url:
         print(f"  [apify_bypasser] Found player iframe: {player_iframe_url[:80]}...")
-        # ── Phase 2: Fetch player page for video_sources ──
-        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser", client, ACTOR_ID)
+        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser")
 
     # Fallback: try direct .mp4 URL in HTML (rare but possible)
     video_url = extract_video_url(html_content)
@@ -333,7 +335,10 @@ async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
     try:
         run = client.actor(ACTOR_ID).call(
             run_input={"url": episode_url},
+            max_items=1,
             timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            wait_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            logger=None,
         )
     except Exception as e:
         print(f"  [apify_scraper] Actor run failed: {e}")
@@ -346,7 +351,7 @@ async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
         print(f"  [apify_scraper] No dataset returned")
         return None
 
-    items = list(client.dataset(dataset_id).iterate_items())
+    items = _take_dataset_items(client.dataset(dataset_id))
     if not items:
         print(f"  [apify_scraper] Dataset is empty")
         return None
@@ -365,7 +370,7 @@ async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
     player_iframe_url = extract_player_iframe_url(html_content)
     if player_iframe_url:
         print(f"  [apify_scraper] Found player iframe: {player_iframe_url[:80]}...")
-        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper", client, ACTOR_ID)
+        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper")
 
     video_url = extract_video_url(html_content)
     if video_url:
@@ -415,69 +420,28 @@ def _extract_html_from_apify_items(items: list) -> Optional[str]:
     return None
 
 
+def _take_dataset_items(dataset_client, limit: int = 3) -> list[dict]:
+    """Read only the first few dataset items instead of materializing the whole dataset."""
+    items: list[dict] = []
+    for item in dataset_client.iterate_items(clean=True):
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _fetch_player_and_extract(
     player_url: str,
     referer_url: str,
     method_name: str,
-    client,
-    actor_id: str,
 ) -> Optional[str]:
     """Phase 2: Fetch the vid3rb player page and extract MP4 video_sources.
 
-    First tries direct HTTP (fast, free). Falls back to Apify actor if needed.
+    The player page usually does not have Cloudflare, so a direct HTTP fetch is
+    enough and avoids a second paid actor run.
     """
-    import json as _json
-
-    # Try direct HTTP first — player page usually has no Cloudflare
     print(f"  [{method_name}] Phase 2: Fetching player page via HTTP...")
-    video_url = _fetch_player_video_sources(player_url, referer_url)
-    if video_url:
-        return video_url
-
-    # Fallback: Use the same Apify actor to fetch the player page
-    print(f"  [{method_name}] Phase 2 fallback: Using Apify to fetch player page...")
-    try:
-        run2 = client.actor(actor_id).call(
-            run_input={"url": player_url},
-            timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
-        )
-    except Exception as e:
-        print(f"  [{method_name}] Phase 2 fallback failed: {e}")
-        return None
-
-    dataset_id2 = run2.get("defaultDatasetId")
-    if not dataset_id2:
-        return None
-
-    items2 = list(client.dataset(dataset_id2).iterate_items())
-    player_html = _extract_html_from_apify_items(items2)
-    if not player_html:
-        # Also check raw item content for video URLs
-        for item in items2:
-            item_str = str(item)
-            video_url = extract_video_url(item_str)
-            if video_url:
-                print(f"  [{method_name}] Found video URL in Phase 2 item data")
-                return video_url
-        print(f"  [{method_name}] Phase 2: no HTML from actor")
-        return None
-
-    print(f"  [{method_name}] Phase 2: got {len(player_html)} chars from actor")
-
-    # Parse video_sources from the player HTML
-    video_url = _parse_video_sources_from_html(player_html, method_name)
-    if video_url:
-        return video_url
-
-    # Fallback: raw URL extraction
-    video_url = extract_video_url(player_html)
-    if video_url:
-        print(f"  [{method_name}] Found video URL in player HTML")
-        return video_url
-
-    print(f"  [{method_name}] Phase 2: no video URL found")
-    _debug_response(method_name, player_html)
-    return None
+    return _fetch_player_video_sources(player_url, referer_url)
 
 
 def _parse_video_sources_from_html(html: str, method_name: str) -> Optional[str]:

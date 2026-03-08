@@ -27,7 +27,7 @@ SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY") or "29e43c18d4b6d6e4b0e37c1758
 
 # Apify — free $5/month, no credit card needed
 # Get your token at: https://console.apify.com/account/integrations
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN") or "apify_api_0aT2Ofe7ac6pWxDxD8BctmojSiPe1n3yoe9c"
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN") or "apify_api_ailbWodSlHsNb8chbgNnpdq1WcB4Kk0Std6Q"
 
 # ─── Timeouts & retries ───────────────────────────────────────
 PAGE_LOAD_TIMEOUT = 60  # seconds to wait for page load
