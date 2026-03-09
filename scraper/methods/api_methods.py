@@ -293,7 +293,13 @@ async def scrape_apify_bypasser(episode_url: str) -> Optional[str]:
     player_iframe_url = extract_player_iframe_url(html_content)
     if player_iframe_url:
         print(f"  [apify_bypasser] Found player iframe: {player_iframe_url[:80]}...")
-        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_bypasser")
+        return _fetch_player_and_extract(
+            player_iframe_url,
+            episode_url,
+            "apify_bypasser",
+            client=client,
+            actor_id=ACTOR_ID,
+        )
 
     # Fallback: try direct .mp4 URL in HTML (rare but possible)
     video_url = extract_video_url(html_content)
@@ -370,7 +376,13 @@ async def scrape_apify_scraper(episode_url: str) -> Optional[str]:
     player_iframe_url = extract_player_iframe_url(html_content)
     if player_iframe_url:
         print(f"  [apify_scraper] Found player iframe: {player_iframe_url[:80]}...")
-        return _fetch_player_and_extract(player_iframe_url, episode_url, "apify_scraper")
+        return _fetch_player_and_extract(
+            player_iframe_url,
+            episode_url,
+            "apify_scraper",
+            client=client,
+            actor_id=ACTOR_ID,
+        )
 
     video_url = extract_video_url(html_content)
     if video_url:
@@ -434,14 +446,84 @@ def _fetch_player_and_extract(
     player_url: str,
     referer_url: str,
     method_name: str,
+    client=None,
+    actor_id: Optional[str] = None,
 ) -> Optional[str]:
     """Phase 2: Fetch the vid3rb player page and extract MP4 video_sources.
 
     The player page usually does not have Cloudflare, so a direct HTTP fetch is
-    enough and avoids a second paid actor run.
+    enough and avoids a second paid actor run. On server IPs that get challenged
+    by Cloudflare, fall back to the same Apify actor used in phase 1.
     """
     print(f"  [{method_name}] Phase 2: Fetching player page via HTTP...")
-    return _fetch_player_video_sources(player_url, referer_url)
+    video_url = _fetch_player_video_sources(player_url, referer_url)
+    if video_url:
+        return video_url
+
+    if not client or not actor_id:
+        return None
+
+    print(f"  [{method_name}] Phase 2 fallback: Fetching player page via Apify...")
+    player_html = _fetch_url_via_apify(client, actor_id, player_url, method_name, "Phase 2 fallback")
+    if not player_html:
+        return None
+
+    print(f"  [{method_name}] Apify player HTML: {len(player_html)} chars")
+
+    video_url = _parse_video_sources_from_html(player_html, method_name)
+    if video_url:
+        return video_url
+
+    video_url = extract_video_url(player_html)
+    if video_url:
+        print(f"  [{method_name}] Found video URL in Apify player HTML")
+        return video_url
+
+    if is_cloudflare_challenge(player_html):
+        print(f"  [{method_name}] Player page is still challenged after Apify fallback")
+
+    _debug_response(f"{method_name}-player", player_html)
+    return None
+
+
+def _fetch_url_via_apify(
+    client,
+    actor_id: str,
+    target_url: str,
+    method_name: str,
+    phase_label: str,
+) -> Optional[str]:
+    """Fetch a URL through an Apify actor and return the extracted HTML."""
+    try:
+        run = client.actor(actor_id).call(
+            run_input={"url": target_url},
+            max_items=1,
+            timeout_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            wait_secs=config.PAGE_LOAD_TIMEOUT + 60,
+            logger=None,
+        )
+    except Exception as e:
+        print(f"  [{method_name}] {phase_label} actor run failed: {e}")
+        return None
+
+    print(f"  [{method_name}] {phase_label} actor status: {run.get('status')}")
+
+    dataset_id = run.get("defaultDatasetId")
+    if not dataset_id:
+        print(f"  [{method_name}] {phase_label} returned no dataset")
+        return None
+
+    items = _take_dataset_items(client.dataset(dataset_id))
+    if not items:
+        print(f"  [{method_name}] {phase_label} dataset is empty")
+        return None
+
+    html_content = _extract_html_from_apify_items(items)
+    if not html_content:
+        print(f"  [{method_name}] {phase_label} returned no HTML")
+        return None
+
+    return html_content
 
 
 def _parse_video_sources_from_html(html: str, method_name: str) -> Optional[str]:
@@ -501,6 +583,11 @@ def _fetch_player_video_sources(player_url: str, referer_url: str) -> Optional[s
         return None
 
     text = resp.text
+
+    if is_cloudflare_challenge(text):
+        print(f"  [apify] Player page looks challenged by Cloudflare")
+        _debug_response("apify-player", text)
+        return None
 
     # Extract video_sources = [...]; — take the last non-empty match
     matches = _re.findall(r'video_sources\s*=\s*(\[.*?\]);', text, _re.DOTALL)
