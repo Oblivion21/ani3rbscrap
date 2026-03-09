@@ -618,19 +618,18 @@ def _fetch_player_video_sources(player_url: str, referer_url: str) -> Optional[s
 
         return resp.text
 
-    text = _fetch_html(proxies=None, label="apify")
-    if text:
-        video_url = _extract_from_player_html(text, "apify")
-        if video_url:
-            return video_url
-
     proxies = _proxy_config()
-    if not proxies:
-        return None
+    if proxies:
+        print("  [apify] Fetching player page through configured proxy...")
+        text = _fetch_html(proxies=proxies, label="apify-proxy")
+        if text:
+            video_url = _extract_from_player_html(text, "apify-proxy")
+            if video_url:
+                return video_url
+        print("  [apify] Proxy fetch did not yield sources, trying direct fetch...")
 
-    print("  [apify] Retrying player page through configured proxy...")
-    text = _fetch_html(proxies=proxies, label="apify-proxy")
+    text = _fetch_html(proxies=None, label="apify")
     if not text:
         return None
 
-    return _extract_from_player_html(text, "apify-proxy")
+    return _extract_from_player_html(text, "apify")

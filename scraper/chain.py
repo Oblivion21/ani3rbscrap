@@ -1,41 +1,20 @@
 """
-Fallback chain orchestrator.
+Scraper orchestrator.
 
-Tries each scraping method in order (cheapest/fastest first).
-Stops and returns as soon as one method successfully extracts the video URL.
+Only the Apify bypasser method is supported.
 """
 
 import asyncio
 from typing import Optional, Callable, Awaitable
 
-from scraper.methods import curl_method, camoufox_method, nodriver_method, patchright_method
-from scraper.methods.api_methods import (
-    scrape_scrapeops,
-    scrape_scrapfly,
-    scrape_crawlbase,
-    scrape_scraperapi,
-    scrape_apify_bypasser,
-    scrape_apify_scraper,
-)
+from scraper.methods.api_methods import scrape_apify_bypasser
 from scraper.utils import SkipMethod
 import config
 
 
-# Ordered list of (name, async scrape function)
+# Ordered list of supported methods.
 METHODS: list[tuple[str, Callable[[str], Awaitable[Optional[str]]]]] = [
-    # Phase 1: Free / open-source
-    ("curl_cffi",   curl_method.scrape),
-    ("camoufox",    camoufox_method.scrape),
-    ("nodriver",    nodriver_method.scrape),
-    ("patchright",  patchright_method.scrape),
-    # Phase 3: Paid APIs
-    ("scrapeops",   scrape_scrapeops),
-    ("scrapfly",    scrape_scrapfly),
-    ("crawlbase",   scrape_crawlbase),
-    ("scraperapi",      scrape_scraperapi),
-    # Apify actors — Cloudflare bypass via cloud
-    ("apify_bypasser",  scrape_apify_bypasser),
-    ("apify_scraper",   scrape_apify_scraper),
+    ("apify_bypasser", scrape_apify_bypasser),
 ]
 
 
@@ -51,8 +30,8 @@ async def scrape_video_url(
     - Other exception       → transient error, retry up to MAX_RETRIES times
     """
     chain = METHODS
-    if methods:
-        chain = [(name, fn) for name, fn in METHODS if name in methods]
+    if methods and "apify_bypasser" not in methods:
+        print("Only 'apify_bypasser' is supported; ignoring requested methods.")
 
     print(f"Scraping video URL from: {episode_url}")
     print(f"Methods to try: {[name for name, _ in chain]}")

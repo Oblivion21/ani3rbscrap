@@ -4,12 +4,12 @@ anime3rb Cloudflare Bypass Scraper — CLI entry point.
 
 Usage:
     python main.py <episode_url>
-    python main.py <episode_url> --methods curl_cffi,camoufox
-    python main.py <episode_url> --method camoufox
+    python main.py <episode_url>
+    python main.py <episode_url> --method apify_bypasser
 
 Examples:
     python main.py "https://anime3rb.com/episode/some-anime/1"
-    python main.py "https://anime3rb.com/episode/some-anime/1" --methods curl_cffi,nodriver
+    python main.py "https://anime3rb.com/episode/some-anime/1" --method apify_bypasser
 """
 
 import argparse
@@ -31,13 +31,13 @@ def main():
         "--methods",
         type=str,
         default=None,
-        help="Comma-separated list of methods to try (e.g. curl_cffi,camoufox,nodriver)",
+        help="Deprecated. Only apify_bypasser is supported.",
     )
     parser.add_argument(
         "--method",
         type=str,
         default=None,
-        help="Single method to use (e.g. camoufox)",
+        help="Single method to use. Only apify_bypasser is supported.",
     )
 
     args = parser.parse_args()
@@ -57,8 +57,7 @@ def main():
         sys.exit(0)
     else:
         print(f"\nFailed to extract video URL from: {args.url}")
-        print("Try running with --methods to test specific methods,")
-        print("or configure API keys in config.py for paid services.")
+        print("Ensure APIFY_TOKEN and proxy settings are configured correctly.")
         sys.exit(1)
 
 
