@@ -557,61 +557,80 @@ def _fetch_player_video_sources(player_url: str, referer_url: str) -> Optional[s
         video_sources = [{src: "https://files.vid3rb.com/.../1080p.mp4?...", ...}, ...]
     The second match is the real one (first is often an empty []).
     """
-    import re as _re
-    import json as _json
     import requests as _requests
 
-    session = _requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36",
-        "Referer": referer_url,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-    })
+    def _build_session() -> _requests.Session:
+        session = _requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36",
+            "Referer": referer_url,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        })
+        return session
 
-    try:
-        print(f"  [apify] Fetching player page: {player_url[:80]}...")
-        resp = session.get(player_url, timeout=30)
-        print(f"  [apify] Player page status: {resp.status_code}, {len(resp.text)} chars")
-    except Exception as e:
-        print(f"  [apify] Player page fetch failed: {e}")
-        return None
+    def _proxy_config() -> Optional[dict]:
+        if not config.PROXY_SERVER:
+            return None
 
-    if resp.status_code != 200:
-        return None
+        proxy_url = config.PROXY_SERVER
+        if config.PROXY_USERNAME:
+            proxy_url = proxy_url.replace(
+                "://",
+                f"://{config.PROXY_USERNAME}:{config.PROXY_PASSWORD}@",
+                1,
+            )
+        return {"http": proxy_url, "https": proxy_url}
 
-    text = resp.text
+    def _extract_from_player_html(text: str, log_name: str) -> Optional[str]:
+        if is_cloudflare_challenge(text):
+            print(f"  [{log_name}] Player page looks challenged by Cloudflare")
+            _debug_response("apify-player", text)
+            return None
 
-    if is_cloudflare_challenge(text):
-        print(f"  [apify] Player page looks challenged by Cloudflare")
+        video_url = _parse_video_sources_from_html(text, log_name)
+        if video_url:
+            return video_url
+
+        video_url = extract_video_url(text)
+        if video_url:
+            print(f"  [{log_name}] Found video URL in player page HTML")
+            return video_url
+
+        print(f"  [{log_name}] No video_sources found in player page HTML")
         _debug_response("apify-player", text)
         return None
 
-    # Extract video_sources = [...]; — take the last non-empty match
-    matches = _re.findall(r'video_sources\s*=\s*(\[.*?\]);', text, _re.DOTALL)
-    for raw in reversed(matches):
-        if len(raw) <= 5:
-            continue
+    def _fetch_html(proxies: Optional[dict], label: str) -> Optional[str]:
+        session = _build_session()
         try:
-            sources = _json.loads(raw)
-            valid = [s for s in sources if s.get("src") and not s.get("premium")]
-            valid.sort(key=lambda s: int(s.get("res", 0)), reverse=True)
-            if valid:
-                best = valid[0]["src"].replace("\\/", "/")
-                print(f"  [apify] Found {len(valid)} sources from player page, "
-                      f"best: {valid[0].get('label', '?')}")
-                return best
+            print(f"  [{label}] Fetching player page: {player_url[:80]}...")
+            resp = session.get(player_url, timeout=30, proxies=proxies)
+            print(f"  [{label}] Player page status: {resp.status_code}, {len(resp.text)} chars")
         except Exception as e:
-            print(f"  [apify] Failed to parse video_sources JSON: {e}")
+            print(f"  [{label}] Player page fetch failed: {e}")
+            return None
 
-    # Fallback: look for MP4 URLs in raw HTML
-    video_url = extract_video_url(text)
-    if video_url:
-        print(f"  [apify] Found video URL in player page HTML")
-        return video_url
+        if resp.status_code != 200:
+            return None
 
-    print(f"  [apify] No video_sources found in player page HTML")
-    _debug_response("apify-player", text)
-    return None
+        return resp.text
+
+    text = _fetch_html(proxies=None, label="apify")
+    if text:
+        video_url = _extract_from_player_html(text, "apify")
+        if video_url:
+            return video_url
+
+    proxies = _proxy_config()
+    if not proxies:
+        return None
+
+    print("  [apify] Retrying player page through configured proxy...")
+    text = _fetch_html(proxies=proxies, label="apify-proxy")
+    if not text:
+        return None
+
+    return _extract_from_player_html(text, "apify-proxy")
